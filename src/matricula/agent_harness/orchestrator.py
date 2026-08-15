@@ -36,7 +36,7 @@ from matricula.io.paths import profesores_file
 from matricula.io.period_md import PeriodRecord, write_period
 from matricula.io.student_md import write_student
 from matricula.io.teacher_md import TeacherRegistry, read_teachers, write_teachers
-from matricula.orchestration.runner import RunResult, new_carnets
+from matricula.orchestration.runner import RunResult, _emit_cuatrimestre_summary, new_carnets
 from matricula.reporting.summary import RunSummary
 from matricula.simulation.naming import allocate_names
 
@@ -199,6 +199,10 @@ async def _run_period_with_agent_async(
                 records=[*state.existing_teacher_records, *state.new_teacher_records],
             ),
         )
+
+        # Mismo censo que emite persist_results_tool en el camino feliz -- ver
+        # tools.py -- para que el force-persist tambien lo reporte.
+        _emit_cuatrimestre_summary(emit, base_dir)
 
         state.summary = RunSummary(
             period=str(period),

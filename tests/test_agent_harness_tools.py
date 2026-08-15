@@ -3,9 +3,10 @@ de `orchestration/*` correspondiente, sin reimplementar logica de negocio.
 
 `claude_agent_sdk` no es una dependencia base del proyecto (extra opcional
 "agents"), asi que estos tests instalan un stub minimo del paquete en
-`sys.modules` antes de importar `agent_harness.tools` -- el stub solo imita
-la forma de `@tool`/`create_sdk_mcp_server` lo suficiente para que los
-handlers se puedan invocar directamente como funciones async, sin levantar
+`sys.modules` antes de importar `agent_harness.tools` -- el stub imita la
+forma real de `@tool` (devuelve un objeto tipo `SdkMcpTool` con `.name` y
+`.handler`, no la funcion decorada) y de `create_sdk_mcp_server`, lo
+suficiente para invocar cada handler como funcion async sin levantar
 ninguna sesion real del SDK.
 """
 
@@ -24,11 +25,20 @@ def _install_fake_claude_agent_sdk() -> None:
         return
     fake = types.ModuleType("claude_agent_sdk")
 
+    class _FakeSdkMcpTool:
+        """Imita la forma real de `SdkMcpTool`: un objeto con `.name` y
+        `.handler`, no la funcion decorada -- ver claude_agent_sdk.tool."""
+
+        def __init__(self, name, description, input_schema, handler, annotations=None):
+            self.name = name
+            self.description = description
+            self.input_schema = input_schema
+            self.handler = handler
+            self.annotations = annotations
+
     def tool(name, description, input_schema, annotations=None):
         def decorator(fn):
-            fn.tool_name = name
-            fn.tool_description = description
-            return fn
+            return _FakeSdkMcpTool(name, description, input_schema, fn, annotations)
 
         return decorator
 
@@ -70,18 +80,16 @@ def tools_by_name(state: PipelineState):
     gate = PhaseGate()
     events: list[dict] = []
     _server, _allowed = build_tools(state, gate, max_workers=1, on_event=events.append)
-    # Reconstruimos el mapeo nombre->handler leyendo los atributos que el
-    # stub de @tool deja en cada funcion decorada, para no depender de un
-    # segundo build_tools() (evita divergencia de estado entre el gate real
-    # y el usado en las aserciones).
+    # server["tools"] son objetos _FakeSdkMcpTool (name + handler), no las
+    # funciones decoradas -- imita la forma real de SdkMcpTool del SDK.
     return gate, events, _server
 
 
 def test_simulate_grades_tool_delegates_to_worker_pool(state, tools_by_name):
     gate, events, server = tools_by_name
-    fn = next(t for t in server["tools"] if t.tool_name == "simulate_grades")
+    fn = next(t for t in server["tools"] if t.name == "simulate_grades")
 
-    result = _run(fn({}))
+    result = _run(fn.handler({}))
 
     assert result.get("is_error") is not True
     assert gate.completed == ["simulate_grades"]
@@ -92,9 +100,9 @@ def test_simulate_grades_tool_delegates_to_worker_pool(state, tools_by_name):
 
 def test_validate_requests_tool_out_of_order_returns_gate_error(state, tools_by_name):
     _gate, _events, server = tools_by_name
-    fn = next(t for t in server["tools"] if t.tool_name == "validate_requests")
+    fn = next(t for t in server["tools"] if t.name == "validate_requests")
 
-    result = _run(fn({}))
+    result = _run(fn.handler({}))
 
     assert result.get("is_error") is True
     assert "simulate_grades" in result["content"][0]["text"]
@@ -102,11 +110,11 @@ def test_validate_requests_tool_out_of_order_returns_gate_error(state, tools_by_
 
 def test_validate_requests_tool_delegates_to_validation_module(state, tools_by_name):
     gate, _events, server = tools_by_name
-    simulate = next(t for t in server["tools"] if t.tool_name == "simulate_grades")
-    validate = next(t for t in server["tools"] if t.tool_name == "validate_requests")
+    simulate = next(t for t in server["tools"] if t.name == "simulate_grades")
+    validate = next(t for t in server["tools"] if t.name == "validate_requests")
 
-    _run(simulate({}))
-    result = _run(validate({}))
+    _run(simulate.handler({}))
+    result = _run(validate.handler({}))
 
     assert result.get("is_error") is not True
     assert gate.completed == ["simulate_grades", "validate_requests"]
@@ -116,9 +124,9 @@ def test_validate_requests_tool_delegates_to_validation_module(state, tools_by_n
 
 def test_persist_results_tool_requires_full_sequence_first(state, tools_by_name):
     _gate, _events, server = tools_by_name
-    fn = next(t for t in server["tools"] if t.tool_name == "persist_results")
+    fn = next(t for t in server["tools"] if t.name == "persist_results")
 
-    result = _run(fn({}))
+    result = _run(fn.handler({}))
 
     assert result.get("is_error") is True
     assert state.persisted is False
@@ -131,9 +139,9 @@ def test_raise_alerts_tool_is_read_only_and_does_not_touch_gate(state, tools_by_
     state.alerts.append(
         Alert(carnet="260001", course_code="MA001", reason="test", status="Rechazada")
     )
-    fn = next(t for t in server["tools"] if t.tool_name == "raise_alerts")
+    fn = next(t for t in server["tools"] if t.name == "raise_alerts")
 
-    result = _run(fn({}))
+    result = _run(fn.handler({}))
 
     assert result.get("is_error") is not True
     assert "260001" in result["content"][0]["text"]
@@ -143,7 +151,7 @@ def test_raise_alerts_tool_is_read_only_and_does_not_touch_gate(state, tools_by_
 
 def test_full_sequence_runs_all_phases_and_persists(state, tools_by_name):
     gate, _events, server = tools_by_name
-    handlers = {t.tool_name: t for t in server["tools"]}
+    handlers = {t.name: t for t in server["tools"]}
 
     for phase in (
         "simulate_grades",
@@ -154,7 +162,7 @@ def test_full_sequence_runs_all_phases_and_persists(state, tools_by_name):
         "assign_students",
         "persist_results",
     ):
-        result = _run(handlers[phase]({}))
+        result = _run(handlers[phase].handler({}))
         assert result.get("is_error") is not True, f"{phase} fallo: {result}"
 
     assert gate.is_complete

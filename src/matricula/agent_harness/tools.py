@@ -31,6 +31,7 @@ from matricula.orchestration.alerts import alerts_from_closed_courses, alerts_fr
 from matricula.orchestration.assignment import assign_students
 from matricula.orchestration.demand import compute_demand
 from matricula.orchestration.grouping import form_groups, rank_by_priority
+from matricula.orchestration.runner import _emit_cuatrimestre_summary
 from matricula.orchestration.scheduling import format_horario, schedule_groups
 from matricula.orchestration.validation import validate_requests
 from matricula.reporting.summary import RunSummary
@@ -423,6 +424,10 @@ def build_tools(
         )
         state.persisted = True
 
+        # Censo global por cuatrimestre, igual que orchestration.runner.run_period:
+        # se emite despues de persistir para reflejar el estado recien escrito.
+        _emit_cuatrimestre_summary(on_event, state.base_dir)
+
         state.summary = RunSummary(
             period=str(state.period),
             students_created=len(state.new_student_carnets),
@@ -467,7 +472,7 @@ def build_tools(
         persist_results_tool,
     ]
     server = create_sdk_mcp_server(name="matricula", version="1.0.0", tools=tool_fns)
-    allowed_tools = [f"mcp__matricula__{fn.__name__.removesuffix('_tool')}" for fn in tool_fns]
+    allowed_tools = [f"mcp__matricula__{fn.name}" for fn in tool_fns]
     return server, allowed_tools
 
 

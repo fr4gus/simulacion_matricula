@@ -95,6 +95,12 @@
     margin-right: 0.5rem;
   }
   .agent-entry .agent-text { white-space: pre-wrap; }
+  .agent-entry.agent-run-marker {
+    color: var(--muted);
+    font-size: 0.75rem;
+    text-align: center;
+    letter-spacing: 0.03em;
+  }
 </style>
 </head>
 <body>
@@ -139,17 +145,17 @@
     </tbody>
   </table>
 
-  <div id="agent-section">
-    <h2>Agente <span class="status">(modo --agents)</span></h2>
-    <div id="agent-log"></div>
-  </div>
-
   <h2 style="margin-top: 2rem;">Censo de cuatrimestres</h2>
   <div class="phases" id="cuatrimestre-body">
     <div class="phase pending">
       <div class="phase-name">Estado</div>
       <div class="phase-value">esperando&hellip;</div>
     </div>
+  </div>
+
+  <div id="agent-section">
+    <h2 style="margin-top: 2rem;">Agente <span class="status">(modo --agents)</span></h2>
+    <div id="agent-log"></div>
   </div>
 
   <script>
@@ -178,13 +184,26 @@
       cuatrimestreBody.innerHTML =
         '<div class="phase pending"><div class="phase-name">Estado</div>' +
         '<div class="phase-value">esperando&hellip;</div></div>';
-      agentSection.style.display = "none";
-      agentLog.innerHTML = "";
+      // El log de agentes NO se limpia aqui a proposito: debe acumular el
+      // historial de mensajes de todas las corridas de esta sesion de viz,
+      // no solo la corrida en curso. Ver appendAgentMessage.
+    }
+
+    function appendAgentRunMarker(period) {
+      // No revela la seccion todavia -- solo se muestra si esta corrida
+      // termina emitiendo al menos un "agent_message" real (modo --agents).
+      if (!agentLog.children.length) return;
+      const marker = document.createElement("div");
+      marker.className = "agent-entry agent-run-marker";
+      marker.textContent = "— nueva corrida: " + period + " —";
+      agentLog.appendChild(marker);
+      agentLog.scrollTop = agentLog.scrollHeight;
     }
 
     function appendAgentMessage(text) {
       // Solo se muestra esta seccion si la corrida usa --agents; el modo
-      // default nunca emite eventos "agent_message".
+      // default nunca emite eventos "agent_message". Se acumula entre
+      // corridas (ver resetUI) para conservar el historial completo.
       agentSection.style.display = "block";
       const entry = document.createElement("div");
       entry.className = "agent-entry";
@@ -247,6 +266,7 @@
           statusEl.textContent = "Corrida en curso (" + evt.period + ")…";
           statusEl.className = "status connected";
           setPhase("phase-pool", "0/" + evt.total_students, false, 0);
+          appendAgentRunMarker(evt.period);
           break;
         case "pool_progress": {
           const pct = evt.total ? Math.round((evt.completed / evt.total) * 100) : 0;
