@@ -41,6 +41,16 @@ Para instalar solo lo necesario para correr el sistema (sin herramientas de desa
 En otra máquina, estos son los únicos pasos: clonar, crear el entorno virtual, instalar. No hay
 configuración adicional, variables de entorno, ni archivos de secretos.
 
+Para el modo opcional `--agents` (ver más abajo) hace falta el extra `agents`:
+
+```bash
+.venv/bin/pip install -e ".[agents]"
+export ANTHROPIC_API_KEY=...
+```
+
+Sin este extra instalado, `matricula run` (sin `--agents`) sigue funcionando exactamente igual —
+`--agents` es la única puerta de entrada a esta dependencia opcional.
+
 ## Uso
 
 El comando principal corre el proceso de matrícula de **un período a la vez**:
@@ -65,6 +75,14 @@ Esto crea, en el directorio actual:
 - `students/DDDDDD.md` — un archivo por estudiante, con su matrícula y expediente de notas.
 - `periodos_lectivos/2026-01.md` — el horario del período, las listas de estudiantes por
   materia/grupo, y las alertas para revisión humana.
+- `profesores.md` — un único archivo (no por período) con el registro de profesores generados
+  hasta ahora y el cursor del pool de nombres compartido (ver abajo).
+
+Los nombres de estudiantes y profesores salen de un pool compartido de 1000 nombres reales
+(`nombres.md`, en la raíz del repo, no del directorio de trabajo) — cada nombre nuevo, sea de
+estudiante o de profesor, consume la siguiente posición libre del pool y nunca repite una ya
+usada dentro de la simulación; `profesores.md` es lo que hace ese seguimiento posible entre
+corridas.
 
 ### Corridas siguientes (consecutivas)
 
@@ -86,7 +104,7 @@ repetición automática de materias reprobadas), y repite todo el pipeline.
 ```
 usage: matricula run [-h] [--seed SEED] [--base-dir BASE_DIR]
                       [--workers WORKERS] [--visualize] [--viz-port VIZ_PORT]
-                      [--demo-delay DEMO_DELAY]
+                      [--demo-delay DEMO_DELAY] [--agents] [--model MODEL]
                       period
 
   period                 Periodo lectivo en formato YYYY-PP (PP: 01-03)
@@ -100,6 +118,10 @@ usage: matricula run [-h] [--seed SEED] [--base-dir BASE_DIR]
   --viz-port VIZ_PORT    Puerto del servidor de visualizacion (default: 8765)
   --demo-delay SEGUNDOS  Retraso artificial entre eventos del visualizador, para demos
                           (default: 0, sin retraso). Solo tiene efecto junto a --visualize.
+  --agents               Corre el pipeline con un agente orquestador real del Claude
+                          Agent SDK en vez del orquestador Python secuencial (ver abajo).
+  --model MODEL          Modelo Claude a usar con --agents (default: env var
+                          MATRICULA_AGENT_MODEL o claude-sonnet-5). Sin efecto sin --agents.
 ```
 
 Ejemplo con un directorio de trabajo explícito (útil para no mezclar corridas con el repo):
@@ -172,6 +194,35 @@ archivos se calculan y escriben exactamente igual; solo cambia cuándo se notifi
 .venv/bin/python -m matricula run 2026-01 --visualize --demo-delay 1
 ```
 
+### Modo agente (`--agents`, opcional)
+
+Por defecto, `matricula run` corre el pipeline de 11 pasos del PRD con un orquestador Python
+secuencial 100% determinista (mismo `--seed` ⇒ mismo resultado, byte a byte, sin importar
+`--workers`). Con `--agents`, en cambio, quien decide *cuándo* invocar cada fase es un agente
+real del [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/python): cada fase del PRD
+(simular notas, validar solicitudes, calcular demanda, formar grupos, generar horario, asignar
+estudiantes, persistir resultados) se expone como una *tool* que el agente invoca.
+
+La lógica de negocio de cada fase **no cambia** — son las mismas funciones puras de
+`orchestration/*` que usa el modo default — y el orden de las fases sigue forzado en Python (un
+`PhaseGate` rechaza cualquier intento del agente de saltarse o repetir un paso fuera de
+secuencia). Lo que gana este modo es un agente que narra en lenguaje natural lo que va
+decidiendo y puede inspeccionar alertas sobre la marcha; lo que se pierde, respecto al modo
+default, es el determinismo estricto y la ausencia de dependencias de red — por eso es opcional
+y no reemplaza al modo default en ningún flujo.
+
+```bash
+.venv/bin/pip install -e ".[agents]"
+export ANTHROPIC_API_KEY=...
+.venv/bin/python -m matricula run 2026-02 --agents
+```
+
+Combina con `--visualize` igual que el modo default; el visualizador recibe además eventos
+`agent_message` con lo que el agente va narrando. Si el agente no llega a invocar la última fase
+(se cuelga, falla, agota su presupuesto de turnos), el harness persiste igual lo que se alcanzó a
+calcular y agrega una alerta documentando la corrida incompleta — nunca se cuelga la corrida ni
+queda `students/`/`periodos_lectivos/` a medio escribir sin explicación.
+
 ## Desarrollo
 
 ```bash
@@ -195,6 +246,7 @@ src/matricula/          # codigo fuente del paquete
   orchestration/            # fases secuenciales del pipeline + el runner central
   reporting/                 # resumen de la corrida y decision de exit code
   viz/                        # visualizador opcional en tiempo real (--visualize / matricula viz)
+  agent_harness/               # modo opcional --agents: orquestador via Claude Agent SDK
 tests/                   # suite de pytest
 PRD.md                   # especificacion del dominio (incluye seccion de aclaraciones)
 AGENTS.md                # convenciones de estructura y estilo

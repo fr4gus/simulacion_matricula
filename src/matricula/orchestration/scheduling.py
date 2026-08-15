@@ -19,7 +19,7 @@ no depende de nada mas que la entrada.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import combinations
 
 from matricula.config import (
@@ -32,7 +32,8 @@ from matricula.config import (
     SCHOOL_END_HOUR,
     SPLIT_BLOCK_MINUTES,
 )
-from matricula.domain.models import Alert, Group, GroupSchedule, ScheduleBlock
+from matricula.domain.models import Alert, Group, GroupSchedule, ScheduleBlock, TeacherRecord
+from matricula.simulation.naming import POOL_SIZE, allocate_names
 
 REASON_UNSCHEDULABLE = "No fue posible asignar horario/aula/profesor sin conflictos"
 
@@ -106,26 +107,52 @@ def format_horario(blocks: list[ScheduleBlock]) -> str:
 
 @dataclass
 class TeacherPool:
-    """Genera nombres de profesor nuevos; uno por grupo adicional de una materia."""
+    """Asigna nombres de profesor nuevos desde el pool compartido de nombres
+    (`domain.names`), uno por grupo adicional; nunca reusa el mismo indice del
+    pool dentro de la misma corrida.
 
-    _counters: dict[str, int]
+    `start_index` es el cursor con el que arranca esta corrida (leido de
+    `profesores.md`, ver `io/teacher_md.py`); `next_free_index`, tras agotar
+    la instancia, es el cursor a persistir para la proxima corrida.
+    """
 
-    def __init__(self) -> None:
-        self._counters = {}
+    start_index: int
+    records: list[TeacherRecord] = field(default_factory=list)
 
-    def new_teacher_for(self, course_code: str) -> str:
-        self._counters[course_code] = self._counters.get(course_code, 0) + 1
-        return f"Profesor {course_code}-{self._counters[course_code]}"
+    def __post_init__(self) -> None:
+        self._next_index = self.start_index
+
+    def new_teacher_for(self, group_code: str) -> str:
+        allocation = allocate_names(self._next_index, 1)
+        nombre, apellidos = allocation.names[0]
+        full_name = f"{nombre} {apellidos}"
+        record = TeacherRecord(
+            pool_index=self._next_index % POOL_SIZE, full_name=full_name, group_code=group_code
+        )
+        self.records.append(record)
+        self._next_index = allocation.next_free_index
+        return full_name
+
+    @property
+    def next_free_index(self) -> int:
+        return self._next_index
 
 
-def schedule_groups(groups: list[Group]) -> tuple[list[GroupSchedule], list[Alert]]:
+def schedule_groups(
+    groups: list[Group], teacher_start_index: int = 0
+) -> tuple[list[GroupSchedule], list[Alert], list[TeacherRecord], int]:
     """Asigna profesor, aula y horario a cada grupo, en orden materia+grupo.
 
+    Retorna `(schedules, alerts, teacher_records, next_free_teacher_index)`:
+    `teacher_records` son los profesores nuevos generados en esta llamada
+    (para persistir en `profesores.md`) y `next_free_teacher_index` es el
+    cursor del pool de nombres a guardar para la proxima corrida.
+
     Cada grupo recibe un profesor nuevo (nunca compartido entre grupos, ni
-    siquiera de la misma materia). El aula y el bloque horario se buscan
-    entre las combinaciones candidatas, en orden fijo, evitando choques con
-    aulas/profesores ya usados por grupos previamente asignados en esta
-    misma corrida.
+    siquiera de la misma materia), tomado del pool compartido de nombres. El
+    aula y el bloque horario se buscan entre las combinaciones candidatas, en
+    orden fijo, evitando choques con aulas/profesores ya usados por grupos
+    previamente asignados en esta misma corrida.
 
     Ademas de las restricciones duras (profesor y aula nunca se comparten en
     el mismo bloque), se prefiere activamente un horario que no choque con
@@ -139,7 +166,7 @@ def schedule_groups(groups: list[Group]) -> tuple[list[GroupSchedule], list[Aler
     candidato que solo respete profesor/aula.
     """
     ordered = sorted(groups, key=lambda g: (g.course_code, g.number))
-    teachers = TeacherPool()
+    teachers = TeacherPool(start_index=teacher_start_index)
     rooms = classroom_codes()
 
     schedules: list[GroupSchedule] = []
@@ -152,7 +179,7 @@ def schedule_groups(groups: list[Group]) -> tuple[list[GroupSchedule], list[Aler
     globally_busy: list[ScheduleBlock] = []
 
     for group in ordered:
-        teacher = teachers.new_teacher_for(group.course_code)
+        teacher = teachers.new_teacher_for(group.group_code)
         teacher_busy: list[ScheduleBlock] = []  # profesor es nuevo, nunca tiene ocupacion previa
 
         assigned: GroupSchedule | None = None
@@ -194,4 +221,4 @@ def schedule_groups(groups: list[Group]) -> tuple[list[GroupSchedule], list[Aler
         globally_busy.extend(chosen.blocks)
         schedules.append(chosen)
 
-    return schedules, alerts
+    return schedules, alerts, teachers.records, teachers.next_free_index

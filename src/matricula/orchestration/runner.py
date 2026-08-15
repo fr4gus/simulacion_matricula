@@ -15,9 +15,16 @@ from matricula.config import NEW_STUDENTS_PER_PERIOD
 from matricula.domain.models import Alert, Request, RequestStatus, Student
 from matricula.domain.periods import Period
 from matricula.domain.study_plan import COURSES_BY_CODE, MAX_CUATRIMESTRE
-from matricula.io.history import latest_period, load_all_students
+from matricula.io.history import (
+    count_graduated_students,
+    latest_period,
+    load_all_students,
+    migrate_graduated_students,
+)
+from matricula.io.paths import profesores_file
 from matricula.io.period_md import HorarioRow, PeriodRecord, RosterEntry, write_period
 from matricula.io.student_md import write_student
+from matricula.io.teacher_md import TeacherRegistry, read_teachers, write_teachers
 from matricula.orchestration.alerts import alerts_from_closed_courses, alerts_from_rejected_requests
 from matricula.orchestration.assignment import assign_students
 from matricula.orchestration.demand import compute_demand
@@ -25,6 +32,7 @@ from matricula.orchestration.grouping import form_groups, rank_by_priority
 from matricula.orchestration.scheduling import format_horario, schedule_groups
 from matricula.orchestration.validation import validate_requests
 from matricula.reporting.summary import RunSummary
+from matricula.simulation.naming import allocate_names
 from matricula.simulation.requests import next_pending_cuatrimestre
 from matricula.simulation.worker import WorkerResult, process_student
 
@@ -36,7 +44,7 @@ class RunResult:
     students: list[Student] = field(default_factory=list)
 
 
-def _new_carnets(base_dir: Path, period: Period, count: int) -> list[str]:
+def new_carnets(base_dir: Path, period: Period, count: int) -> list[str]:
     prefix = f"{period.year % 100:02d}"
     existing = load_all_students(base_dir)
     existing_seq = [int(s.carnet[2:]) for s in existing if s.carnet.startswith(prefix)]
@@ -56,15 +64,19 @@ def _emit_cuatrimestre_summary(emit: Callable[[dict], None], base_dir: Path) -> 
     eventos, no describe esta corrida sino el estado acumulado de toda la
     carrera hasta ahora.
     """
+    # Los graduados ya no viven en students/ (migrate_graduated_students los
+    # movio a graduated/ al inicio del run), asi que este censo solo ve
+    # estudiantes activos: cuatrimestre_counts nunca incluye graduados.
     census_students = load_all_students(base_dir)
     cuatrimestre_counts = {n: 0 for n in range(1, MAX_CUATRIMESTRE + 1)}
-    graduados = 0
     for student in census_students:
         cuatrimestre = next_pending_cuatrimestre(student)
-        if cuatrimestre is None:
-            graduados += 1
-        else:
+        # None (ya aprobo todo) no deberia ocurrir aqui -- se habria migrado
+        # a graduated/ antes de este censo -- pero se ignora defensivamente
+        # en vez de reventar si algun caller llama esto fuera de secuencia.
+        if cuatrimestre is not None:
             cuatrimestre_counts[cuatrimestre] += 1
+    graduados = count_graduated_students(base_dir)
 
     emit(
         {
@@ -73,7 +85,7 @@ def _emit_cuatrimestre_summary(emit: Callable[[dict], None], base_dir: Path) -> 
                 f"cuatrimestre_{n}": count for n, count in cuatrimestre_counts.items()
             },
             "graduados": graduados,
-            "total_students": len(census_students),
+            "total_students": len(census_students) + graduados,
         }
     )
 
@@ -115,16 +127,33 @@ def run_period(
     """
     emit: Callable[[dict], None] = on_event or (lambda event: None)
 
+    # Antes de cargar el censo activo: mover a graduated/ a quien ya haya
+    # aprobado todo el plan en un run anterior. Deja de ocupar workers y de
+    # aparecer en el censo por cuatrimestre a partir de este run en adelante
+    # (ver io/history.py::migrate_graduated_students).
+    migrate_graduated_students(base_dir)
+
     prev_period = latest_period(base_dir)
 
     students = load_all_students(base_dir)
     students_by_carnet = {s.carnet: s for s in students}
 
     # --- Paso 3: crear estudiantes nuevos de este periodo ---
-    new_carnets = _new_carnets(base_dir, period, NEW_STUDENTS_PER_PERIOD)
+    # Los nombres de estudiantes y de profesores salen del mismo pool
+    # compartido (domain.names.NAME_POOL); el cursor "proximo indice libre"
+    # persiste en profesores.md, unica fuente de verdad sobre cuantos nombres
+    # ya se repartieron (ver io/teacher_md.py y simulation/naming.py).
+    teacher_registry = read_teachers(profesores_file(base_dir))
+    name_cursor = teacher_registry.next_free_index
+
+    new_period_carnets = new_carnets(base_dir, period, NEW_STUDENTS_PER_PERIOD)
+    student_names = allocate_names(name_cursor, len(new_period_carnets))
+    name_cursor = student_names.next_free_index
     new_students = [
-        Student(carnet=carnet, apellidos=f"Apellido{carnet}", nombre=f"Nombre{carnet}")
-        for carnet in new_carnets
+        Student(carnet=carnet, apellidos=apellidos, nombre=nombre)
+        for carnet, (nombre, apellidos) in zip(
+            new_period_carnets, student_names.names, strict=True
+        )
     ]
     for s in new_students:
         students_by_carnet[s.carnet] = s
@@ -237,7 +266,9 @@ def run_period(
     emit({"type": "grouping_done", "groups_formed": len(all_groups)})
 
     # --- Paso 8: horario ---
-    schedules, schedule_alerts = schedule_groups(all_groups)
+    schedules, schedule_alerts, new_teacher_records, name_cursor = schedule_groups(
+        all_groups, teacher_start_index=name_cursor
+    )
     alerts.extend(schedule_alerts)
     emit(
         {
@@ -309,6 +340,13 @@ def run_period(
     for student in all_students:
         write_student(base_dir, student)
     write_period(base_dir, period_record)
+    write_teachers(
+        base_dir,
+        TeacherRegistry(
+            next_free_index=name_cursor,
+            records=[*teacher_registry.records, *new_teacher_records],
+        ),
+    )
 
     summary = RunSummary(
         period=str(period),

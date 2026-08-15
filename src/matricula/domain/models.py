@@ -112,3 +112,20 @@ class Alert:
     course_code: str
     reason: str
     status: str
+
+
+@dataclass(frozen=True)
+class TeacherRecord:
+    """Un profesor generado a partir del pool compartido de nombres (`domain.names`).
+
+    `pool_index` es la posicion (0..999) en `domain.names.NAME_POOL` de donde
+    salio el nombre -- la clave real que evita reusar el mismo indice dos
+    veces entre estudiantes y profesores, a traves de corridas (ver
+    `simulation/naming.py` e `io/teacher_md.py`, que persiste estos registros
+    en `profesores.md`). `group_code` es el grupo al que quedo asignado este
+    profesor en la corrida donde se lo genero (formato `MA001-01`).
+    """
+
+    pool_index: int
+    full_name: str
+    group_code: str

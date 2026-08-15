@@ -75,6 +75,32 @@
     background: rgba(242, 184, 75, 0.15);
     color: var(--warn);
   }
+
+  #agent-section { display: none; margin-top: 2rem; }
+  #agent-log {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    max-height: 320px;
+    overflow-y: auto;
+    font-size: 0.85rem;
+  }
+  .agent-entry { padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
+  .agent-entry:last-child { border-bottom: none; }
+  .agent-entry .agent-time {
+    color: var(--muted);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    margin-right: 0.5rem;
+  }
+  .agent-entry .agent-text { white-space: pre-wrap; }
+  .agent-entry.agent-run-marker {
+    color: var(--muted);
+    font-size: 0.75rem;
+    text-align: center;
+    letter-spacing: 0.03em;
+  }
 </style>
 </head>
 <body>
@@ -127,11 +153,18 @@
     </div>
   </div>
 
+  <div id="agent-section">
+    <h2 style="margin-top: 2rem;">Agente <span class="status">(modo --agents)</span></h2>
+    <div id="agent-log"></div>
+  </div>
+
   <script>
     const statusEl = document.getElementById("status");
     const alertsBody = document.getElementById("alerts-body");
     const alertCountEl = document.getElementById("alert-count");
     const cuatrimestreBody = document.getElementById("cuatrimestre-body");
+    const agentSection = document.getElementById("agent-section");
+    const agentLog = document.getElementById("agent-log");
     let alertCount = 0;
     let alertsCleared = false;
 
@@ -151,6 +184,39 @@
       cuatrimestreBody.innerHTML =
         '<div class="phase pending"><div class="phase-name">Estado</div>' +
         '<div class="phase-value">esperando&hellip;</div></div>';
+      // El log de agentes NO se limpia aqui a proposito: debe acumular el
+      // historial de mensajes de todas las corridas de esta sesion de viz,
+      // no solo la corrida en curso. Ver appendAgentMessage.
+    }
+
+    function appendAgentRunMarker(period) {
+      // No revela la seccion todavia -- solo se muestra si esta corrida
+      // termina emitiendo al menos un "agent_message" real (modo --agents).
+      if (!agentLog.children.length) return;
+      const marker = document.createElement("div");
+      marker.className = "agent-entry agent-run-marker";
+      marker.textContent = "— nueva corrida: " + period + " —";
+      agentLog.appendChild(marker);
+      agentLog.scrollTop = agentLog.scrollHeight;
+    }
+
+    function appendAgentMessage(text) {
+      // Solo se muestra esta seccion si la corrida usa --agents; el modo
+      // default nunca emite eventos "agent_message". Se acumula entre
+      // corridas (ver resetUI) para conservar el historial completo.
+      agentSection.style.display = "block";
+      const entry = document.createElement("div");
+      entry.className = "agent-entry";
+      const time = document.createElement("span");
+      time.className = "agent-time";
+      time.textContent = new Date().toLocaleTimeString();
+      const body = document.createElement("span");
+      body.className = "agent-text";
+      body.textContent = text;
+      entry.appendChild(time);
+      entry.appendChild(body);
+      agentLog.appendChild(entry);
+      agentLog.scrollTop = agentLog.scrollHeight;
     }
 
     function makePhaseCard(name, value, done) {
@@ -200,6 +266,7 @@
           statusEl.textContent = "Corrida en curso (" + evt.period + ")…";
           statusEl.className = "status connected";
           setPhase("phase-pool", "0/" + evt.total_students, false, 0);
+          appendAgentRunMarker(evt.period);
           break;
         case "pool_progress": {
           const pct = evt.total ? Math.round((evt.completed / evt.total) * 100) : 0;
@@ -227,6 +294,9 @@
           break;
         case "alerts":
           appendAlerts(evt.alerts);
+          break;
+        case "agent_message":
+          appendAgentMessage(evt.text);
           break;
         case "run_completed":
           statusEl.textContent = "Corrida completada (exit " + evt.summary.exit_code + ")";

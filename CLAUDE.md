@@ -11,22 +11,31 @@ split-block day rules, 50+ profile accumulation, retake auto-requesting) — rea
 alongside the rest of the PRD, since it overrides anything that reads ambiguous above it.
 
 The system is a **multi-agent enrollment (matricula) simulation harness**, explicitly without
-any LLM wrapper — the "agents" are plain Python orchestration + a `ProcessPoolExecutor` pool of
-per-student worker processes, not LLM-backed agents.
+any LLM wrapper in its default mode — the "agents" are plain Python orchestration + a
+`ProcessPoolExecutor` pool of per-student worker processes, not LLM-backed agents. A separate,
+opt-in `--agents` mode (`agent_harness/`, see below) layers a real Claude Agent SDK orchestrator
+on top of the *same* deterministic business logic, without altering it — see that module's own
+section further down for the boundary between the two modes.
 
 ### Module map (`src/matricula/`)
 
 - `config.py` — every PRD constant (PASS_GRADE, GROUP_CAPACITY, BLOCK_START_HOURS, DAY_CODES, …).
-- `domain/` — pure, I/O-free: `models.py` (dataclasses), `study_plan.py` (hardcoded plan,
-  validates course-code uniqueness + prerequisite-cycle absence at import time), `periods.py`
-  (`Period` value type, `YYYY-PP` parsing, `is_consecutive`).
+- `domain/` — pure, I/O-free: `models.py` (dataclasses, including `TeacherRecord`), `study_plan.py`
+  (hardcoded plan, validates course-code uniqueness + prerequisite-cycle absence at import time),
+  `periods.py` (`Period` value type, `YYYY-PP` parsing, `is_consecutive`), `names.py` (parses
+  `nombres.md`, at the repo root, into the 1000-entry `NAME_POOL` shared by students and teachers
+  — see "Shared name pool" below).
 - `io/` — Markdown read/write pairs: `markdown_tables.py` (shared pipe-table parser/renderer),
   `student_md.py` (`students/DDDDDD.md`), `period_md.py` (`periodos_lectivos/YYYY-PP.md`),
-  `history.py` (latest stored period, load-all-students).
+  `teacher_md.py` (`profesores.md` — teacher name registry + shared name-pool cursor),
+  `history.py` (latest stored period, load-all-students, and
+  `migrate_graduated_students()`/`count_graduated_students()` — see "Graduated students" below).
 - `simulation/` — `grades.py` (seeded 80%-pass grade simulation), `requests.py` (pure
-  next-cuatrimestre + retake request-building logic), `worker.py` (`process_student()` — the
-  single picklable top-level function dispatched per-student to the `ProcessPoolExecutor`; derives
-  its RNG seed via `sha256(run_seed:carnet)`, never Python's salted `hash()`).
+  next-cuatrimestre + retake request-building logic), `naming.py` (`allocate_names()` — pure,
+  deterministic, cursor-based allocation from `NAME_POOL`, wraps around at 1000), `worker.py`
+  (`process_student()` — the single picklable top-level function dispatched per-student to the
+  `ProcessPoolExecutor`; derives its RNG seed via `sha256(run_seed:carnet)`, never Python's salted
+  `hash()`).
 - `orchestration/` — one module per sequential pipeline phase, run in the main process after
   worker results are merged: `validation.py`, `demand.py`, `grouping.py` (priority only gates
   admission; group-slot assignment is round-robin/balanced), `scheduling.py` (deterministic,
@@ -35,8 +44,15 @@ per-student worker processes, not LLM-backed agents.
   (per-student conflict-free group assignment), `alerts.py`, `runner.py` (`run_period()` —
   the top-level entry point wiring all 11 PRD steps together).
 - `reporting/summary.py` — human-facing run summary + exit-code decision.
+- `agent_harness/` — opt-in `--agents` mode: `gate.py` (`PhaseGate`, hard-enforces PRD phase
+  order regardless of what the LLM attempts), `state.py` (`PipelineState`, the in-memory mirror
+  of `runner.py`'s local variables, mutated by tool calls instead of by sequential code),
+  `tools.py` (one Agent SDK `@tool` per PRD phase, each a thin wrapper delegating to the same
+  `orchestration/*` function `runner.py` calls — no business logic is duplicated), `orchestrator.py`
+  (`run_period_with_agent()` — the `--agents` counterpart to `runner.run_period()`, same
+  signature, drives a real `ClaudeSDKClient` session). See "Agent-driven orchestration mode" below.
 - `cli.py` / `__main__.py` — `python -m matricula run <period> [--seed N] [--base-dir PATH]
-  [--workers N]`.
+  [--workers N] [--agents] [--model NAME]`.
 
 ### Key design decisions worth knowing before touching this code
 
@@ -55,6 +71,83 @@ per-student worker processes, not LLM-backed agents.
   never affect the exit code.
 - **Persistence**: `students/*.md` and `periodos_lectivos/*.md` are the only source of truth;
   writers always re-render the full file from the in-memory dataclass rather than patching text.
+
+## Agent-driven orchestration mode (`--agents`, opt-in)
+
+`agent_harness/` wraps the exact same deterministic pipeline with a real Claude Agent SDK
+orchestrator instead of `runner.run_period()`'s sequential Python calls. This is **not** a
+replacement for the default mode and does not change any PRD business rule:
+
+- Every phase's logic still lives in `orchestration/*` — `agent_harness/tools.py` only wraps each
+  function as an SDK `@tool` (`simulate_grades`, `validate_requests`, `compute_demand`,
+  `form_groups`, `schedule_groups`, `assign_students`, `persist_results`, plus a read-only
+  `raise_alerts`). The LLM decides *when* to call each tool; it never re-derives the business
+  outcome itself.
+- `agent_harness/gate.py::PhaseGate` enforces the fixed PRD phase order in Python, independent of
+  what the model attempts: a tool call out of sequence returns an error result instead of
+  executing, so the agent can retry/reflect but cannot desync the run from the 11-step pipeline.
+- If the agent's turn ends without invoking `persist_results` (hang, giving up, exhausted turn
+  budget), `orchestrator.py` force-persists whatever the `PipelineState` accumulated and appends
+  an `Alert` documenting the incomplete run — the run never hangs indefinitely or leaves
+  `students/`/`periodos_lectivos/` half-written without an explanation.
+- `claude-agent-sdk` is an **optional** dependency (`pyproject.toml`'s `agents` extra), never a
+  base one — the default mode's `dependencies = []` must stay true. `agent_harness/__init__.py`
+  resolves `run_period_with_agent` via `__getattr__` rather than a top-level import, and `cli.py`
+  only imports the package inside the `--agents` branch of `_run()`, so neither the module import
+  nor the CLI's default path ever requires the SDK to be installed.
+- Determinism is explicitly **not** preserved in this mode (an LLM decides call timing/order of
+  narration) — this is the intentional trade-off of `--agents`; don't try to make it
+  byte-reproducible the way the default mode is.
+
+## Shared name pool (students + teachers)
+
+`nombres.md` (repo root) holds 1000 real-sounding full names ("Nombre Apellido"), one per
+numbered list item, sourced from 1000randomnames.com — see that file's header for provenance.
+Both new students and new teachers draw from this **single shared pool**, never separate ones:
+
+- `domain/names.py::NAME_POOL` parses the file once into an immutable `tuple[(nombre, apellidos), ...]`
+  in file order. No shuffling — "next free name" is a purely positional, deterministic notion.
+- `simulation/naming.py::allocate_names(start_index, count)` is the pure allocator: given a
+  starting cursor, returns the next `count` pool entries and the advanced cursor. Wraps around
+  (modulo 1000) instead of failing if the pool is exhausted.
+- `profesores.md` (repo root, alongside `students/` and `periodos_lectivos/`) is the persisted
+  cursor **and** the full teacher registry — see `io/teacher_md.py::TeacherRegistry`. Its
+  "Proximo indice libre del pool" line is the only source of truth for how many pool entries have
+  been handed out across the whole simulation's history; `students/*.md` stores names as plain
+  text with no pool index, so the cursor cannot be re-derived from disk any other way.
+- Both `orchestration/runner.py::run_period()` and `agent_harness/orchestrator.py` read this
+  cursor first, allocate names for this period's new students, then pass the advanced cursor into
+  `orchestration/scheduling.py::schedule_groups(groups, teacher_start_index=...)` — which now
+  returns `(schedules, alerts, teacher_records, next_free_index)` instead of the old 2-tuple —
+  and finally persist the merged `TeacherRegistry` (old + new records) back to `profesores.md`.
+  Both entry points must stay in lockstep on this protocol; a mismatch would silently start
+  reusing pool indices across runs.
+- The source data itself is not guaranteed unique (2 duplicate full-name pairs out of 1000, since
+  the generator combines first/last names randomly) — "no repeats" here means no *pool index* is
+  ever reused within the simulation's history, not that every rendered full name is distinct.
+
+## Graduated students
+
+Students who have passed every course in the study plan (`next_pending_cuatrimestre()` in
+`simulation/requests.py` returns `None`) stop being part of the active simulation:
+
+- `io/history.py::migrate_graduated_students(base_dir)` moves their `students/DDDDDD.md` file
+  (unmodified, just relocated) to `graduated/DDDDDD.md`. Both `orchestration/runner.py::run_period()`
+  and `agent_harness/orchestrator.py::run_period_with_agent()` call it first thing, before
+  `load_all_students()` — so a student who graduates *during* a run is still processed normally
+  for that run (grades simulated, matricula written), and only stops being loaded starting the
+  *next* run.
+- `graduated/` is purely historical and out-of-pipeline: `load_all_students()` never reads it, so
+  graduated students never occupy a `ProcessPoolExecutor` worker, are never asked to submit
+  requests (moot anyway — `build_request_course_codes()` already returns `[]` once
+  `next_pending_cuatrimestre()` is `None`), and never appear in the per-cuatrimestre census.
+- The `graduados` count in the `cuatrimestre_summary` event (consumed by `viz/`) is still the
+  full historical total — `io/history.py::count_graduated_students()` counts files in
+  `graduated/` directly (no parsing, no pipeline involvement) so the metric doesn't regress to 0
+  once graduates stop living in `students/`.
+- Carnets are never reused: a graduated student's carnet was already consumed by an earlier
+  period's `new_carnets()` call, so relocating the file doesn't risk a collision with future
+  carnet allocation.
 
 ## Domain model (from PRD.md)
 
@@ -90,5 +183,9 @@ Across simulated periods, the system should accumulate 50+ student profiles, wit
 
 ## Output artifacts
 
-- `students/DDDDDD.md` — one file per student: "Matricula" table + "expediente de notas" (grades) table, exact column formats are in `PRD.md` ("Expedientes de Estudiantes").
+- `students/DDDDDD.md` — one file per *active* student: "Matricula" table + "expediente de notas" (grades) table, exact column formats are in `PRD.md` ("Expedientes de Estudiantes"). Same format as `graduated/DDDDDD.md` — see below.
 - `periodos_lectivos/YYYY-PP.md` — one file per period containing: the schedule table (course, name, group, teacher, classroom, horario string like `L 07:00-08:40 / J 09:00-10:40`), one roster table per course+group combo (sorted by apellido then nombre, never mixing groups/courses), and the alerts table (carnet, course, reason, status). Exact table formats are in `PRD.md` ("Resultado de la matricula") — match them precisely, since these are the system's human-facing output.
+- `graduated/DDDDDD.md` — one file per student who has passed every course in the study plan, relocated here (unchanged) from `students/`. Historical only, outside the pipeline — see "Graduated students" above.
+- `profesores.md` — single file at `base_dir` root (not per-period): the shared name-pool cursor plus every teacher generated so far, across all periods. See "Shared name pool" above.
+
+
