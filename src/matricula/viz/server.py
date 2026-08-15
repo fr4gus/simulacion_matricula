@@ -1,9 +1,22 @@
 """Servidor local minimo (HTTP + Server-Sent Events) para ver una corrida en vivo.
 
-Sirve dos rutas:
-  GET /        -> el frontend estatico (static/index.html)
-  GET /events  -> stream `text/event-stream` con los eventos emitidos por
-                  `run_period(..., on_event=...)`, uno por linea `data: <json>`.
+Sirve cuatro rutas:
+  GET  /        -> el frontend estatico (static/index.html)
+  GET  /events  -> stream `text/event-stream` con los eventos emitidos por
+                   `run_period(..., on_event=...)`, uno por linea `data: <json>`.
+  GET  /health  -> `200 {"ok": true}`. Ruta generica y barata para que otro
+                   proceso detecte si ya hay un servidor de matricula-viz
+                   escuchando en un puerto dado, sin tocar `/events` (que
+                   bloquearia como SSE). Usada por `cli.py` para decidir si
+                   `matricula run --visualize` debe levantar su propio
+                   servidor o conectarse como cliente a uno ya corriendo.
+  POST /publish -> recibe un evento JSON en el body y lo retransmite a todos
+                   los clientes SSE conectados, igual que `ServerHandle.emit`.
+                   Es el mecanismo que usa `viz.sink.HttpSink` para alimentar
+                   un servidor standalone (`matricula viz`) desde OTRO
+                   proceso (una corrida de `matricula run` separada). El
+                   servidor no valida el `type` del evento: es un relay
+                   generico, no conoce el dominio de matricula.
 
 No hay buffer/replay de historial: un cliente que se conecta despues del
 inicio de la corrida solo ve eventos desde ese momento en adelante (decision
@@ -60,8 +73,38 @@ def _make_handler(broadcaster: _Broadcaster) -> type[BaseHTTPRequestHandler]:
                 self._serve_index()
             elif self.path == "/events":
                 self._serve_events()
+            elif self.path == "/health":
+                self._serve_health()
             else:
                 self.send_error(404, "No encontrado")
+
+        def do_POST(self) -> None:  # noqa: N802 - nombre requerido por BaseHTTPRequestHandler
+            if self.path == "/publish":
+                self._serve_publish()
+            else:
+                self.send_error(404, "No encontrado")
+
+        def _serve_health(self) -> None:
+            self._send_json(200, {"ok": True})
+
+        def _serve_publish(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length else b""
+            try:
+                event = json.loads(body)
+            except json.JSONDecodeError:
+                self._send_json(400, {"ok": False, "error": "invalid json"})
+                return
+            broadcaster.publish(event)
+            self._send_json(200, {"ok": True})
+
+        def _send_json(self, status: int, payload: dict) -> None:
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def _serve_index(self) -> None:
             body = _INDEX_HTML_PATH.read_bytes()

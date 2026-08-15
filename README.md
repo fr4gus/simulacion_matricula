@@ -86,15 +86,20 @@ repetición automática de materias reprobadas), y repite todo el pipeline.
 ```
 usage: matricula run [-h] [--seed SEED] [--base-dir BASE_DIR]
                       [--workers WORKERS] [--visualize] [--viz-port VIZ_PORT]
+                      [--demo-delay DEMO_DELAY]
                       period
 
-  period                Periodo lectivo en formato YYYY-PP (PP: 01-03)
-  --seed SEED           Semilla RNG (default: 0) — determina la simulacion de notas;
-                         misma semilla = mismo resultado, sin importar --workers.
-  --base-dir BASE_DIR   Directorio raiz para students/ y periodos_lectivos/ (default: .)
-  --workers WORKERS     Numero de procesos del pool (default: os.cpu_count())
-  --visualize           Levanta un servidor local con vista en tiempo real del progreso
-  --viz-port VIZ_PORT   Puerto del servidor de visualizacion (default: 8765)
+  period                 Periodo lectivo en formato YYYY-PP (PP: 01-03)
+  --seed SEED            Semilla RNG (default: 0) — determina la simulacion de notas;
+                          misma semilla = mismo resultado, sin importar --workers.
+  --base-dir BASE_DIR    Directorio raiz para students/ y periodos_lectivos/ (default: .)
+  --workers WORKERS      Numero de procesos del pool (default: os.cpu_count())
+  --visualize            Muestra el progreso en tiempo real. Se conecta a un servidor
+                          'matricula viz' ya corriendo en --viz-port si existe; si no,
+                          levanta uno propio solo para esta corrida.
+  --viz-port VIZ_PORT    Puerto del servidor de visualizacion (default: 8765)
+  --demo-delay SEGUNDOS  Retraso artificial entre eventos del visualizador, para demos
+                          (default: 0, sin retraso). Solo tiene efecto junto a --visualize.
 ```
 
 Ejemplo con un directorio de trabajo explícito (útil para no mezclar corridas con el repo):
@@ -116,19 +121,56 @@ Ejemplo con un directorio de trabajo explícito (útil para no mezclar corridas 
 
 ### Visualizador en tiempo real (opcional)
 
-Con `--visualize`, el comando levanta un servidor local mientras dura la corrida y muestra su
-progreso en el navegador:
+Con `--visualize`, el comando muestra el progreso de la corrida en un navegador mientras esta se
+ejecuta:
 
 ```bash
 .venv/bin/python -m matricula run 2026-01 --visualize
 ```
 
 Imprime una URL (por defecto `http://127.0.0.1:8765`) para abrir en el navegador. La página
-muestra, en vivo, el avance del pool de estudiantes y de cada fase del pipeline (validación,
-demanda, grupos, horario, asignación), además de una tabla de alertas que se va llenando
-conforme ocurren. No requiere instalar nada adicional: el servidor usa solo la librería estándar
-de Python. Si el navegador se conecta después de que la corrida ya avanzó, solo verá los eventos
-a partir de ese momento (no hay reproducción del historial).
+muestra, en vivo:
+
+- El avance del pool de estudiantes y de cada fase del pipeline (validación, demanda, grupos,
+  horario, asignación).
+- Una tabla de alertas que se va llenando conforme ocurren.
+- Un **censo de cuatrimestres**: cuántos estudiantes hay en cada cuatrimestre del plan y cuántos
+  ya se graduaron (aprobaron todas las materias). Este censo es global — cuenta todos los
+  estudiantes en `students/`, no solo los de la corrida actual.
+
+No requiere instalar nada adicional: el servidor usa solo la librería estándar de Python.
+
+#### Servidor de visualización independiente
+
+Si vas a hacer varias corridas seguidas, es mejor levantar el visualizador aparte, una sola vez,
+y dejarlo corriendo:
+
+```bash
+.venv/bin/python -m matricula viz --port 8765   # queda corriendo hasta Ctrl+C
+```
+
+Con el servidor ya corriendo, cada `matricula run --visualize` (mismo `--viz-port`) se conecta a
+él automáticamente en vez de levantar uno nuevo — así puedes correr varios períodos seguidos
+mientras miras la misma pestaña del navegador. Cada corrida nueva resetea la página (limpia las
+tarjetas de fase y la tabla de alertas) antes de mostrar su propio progreso. Si no hay ningún
+servidor escuchando en el puerto, `matricula run --visualize` levanta uno propio para esa corrida
+y lo cierra al terminar (comportamiento por defecto, sin cambios). Si el puerto está ocupado por
+otro proceso que no es un servidor de matrícula, la corrida se aborta con un mensaje claro
+(`exit code 2`).
+
+Si el navegador se conecta después de que una corrida ya avanzó, solo verá los eventos a partir
+de ese momento (no hay reproducción del historial de esa corrida).
+
+#### Retraso artificial para demos (`--demo-delay`)
+
+Una corrida real (10-40 estudiantes) completa el pipeline en milisegundos — muy rápido para ver
+las transiciones de fase a simple vista. `--demo-delay SEGUNDOS` agrega una pausa artificial
+antes de reenviar cada evento al visualizador, sin afectar el resultado de la corrida (los
+archivos se calculan y escriben exactamente igual; solo cambia cuándo se notifica al navegador):
+
+```bash
+.venv/bin/python -m matricula run 2026-01 --visualize --demo-delay 1
+```
 
 ## Desarrollo
 
@@ -152,7 +194,7 @@ src/matricula/          # codigo fuente del paquete
   simulation/              # simulacion de notas + construccion de solicitudes (worker paralelo)
   orchestration/            # fases secuenciales del pipeline + el runner central
   reporting/                 # resumen de la corrida y decision de exit code
-  viz/                        # visualizador opcional en tiempo real (--visualize)
+  viz/                        # visualizador opcional en tiempo real (--visualize / matricula viz)
 tests/                   # suite de pytest
 PRD.md                   # especificacion del dominio (incluye seccion de aclaraciones)
 AGENTS.md                # convenciones de estructura y estilo

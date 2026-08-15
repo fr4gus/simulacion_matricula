@@ -36,10 +36,12 @@ def test_event_sequence_matches_pipeline_order(base_dir: Path):
         "scheduling_done",
         "assignment_done",
         "run_completed",
+        "cuatrimestre_summary",
     ]
 
-    # run_completed es siempre el ultimo evento.
-    assert types[-1] == "run_completed"
+    # cuatrimestre_summary es siempre el ultimo evento (censo global emitido
+    # despues del resumen de esta corrida).
+    assert types[-1] == "cuatrimestre_summary"
 
 
 def test_pool_progress_reaches_total_and_counts_are_consistent(base_dir: Path):
@@ -78,6 +80,34 @@ def test_event_payloads_match_final_summary(base_dir: Path):
     assert run_completed["summary"]["groups_formed"] == summary.groups_formed
     assert run_completed["summary"]["exit_code"] == summary.exit_code
     assert run_completed["summary"]["total_alerts"] == len(summary.alerts)
+
+
+def test_cuatrimestre_summary_payload_shape(base_dir: Path):
+    from matricula.domain.study_plan import MAX_CUATRIMESTRE
+
+    events: list[dict] = []
+    run_period(base_dir, Period.parse("2026-01"), seed=0, max_workers=1, on_event=events.append)
+
+    census = next(e for e in events if e["type"] == "cuatrimestre_summary")
+    assert set(census["cuatrimestre_counts"]) == {
+        f"cuatrimestre_{n}" for n in range(1, MAX_CUATRIMESTRE + 1)
+    }
+    total_from_counts = sum(census["cuatrimestre_counts"].values()) + census["graduados"]
+    assert total_from_counts == census["total_students"]
+    assert census["total_students"] == 10  # bootstrap: solo los 10 estudiantes nuevos
+
+
+def test_cuatrimestre_summary_counts_all_students_not_just_this_run(base_dir: Path):
+    # Corrida 1: crea los primeros 10 estudiantes (cuatrimestre 1).
+    run_period(base_dir, Period.parse("2026-01"), seed=0, max_workers=1)
+
+    # Corrida 2: crea 10 estudiantes MAS. El censo de esta segunda corrida
+    # debe reflejar los 20 en total, no solo los 10 nuevos de este periodo.
+    events: list[dict] = []
+    run_period(base_dir, Period.parse("2026-02"), seed=0, max_workers=1, on_event=events.append)
+
+    census = next(e for e in events if e["type"] == "cuatrimestre_summary")
+    assert census["total_students"] == 20
 
 
 def test_alert_events_carry_only_new_alerts_not_accumulated(base_dir: Path):
