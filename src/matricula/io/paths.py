@@ -1,4 +1,4 @@
-"""Resolucion de rutas para students/ y periodos_lectivos/."""
+"""Resolucion de rutas para students/, periodos_lectivos/ y profesores.md."""
 
 from __future__ import annotations
 
@@ -19,3 +19,8 @@ def student_file(base_dir: Path, carnet: str) -> Path:
 
 def period_file(base_dir: Path, period_str: str) -> Path:
     return periodos_dir(base_dir) / f"{period_str}.md"
+
+
+def profesores_file(base_dir: Path) -> Path:
+    """Archivo unico en la raiz de `base_dir` con el registro de profesores usados."""
+    return base_dir / "profesores.md"

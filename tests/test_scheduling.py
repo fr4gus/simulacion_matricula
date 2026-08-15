@@ -11,14 +11,19 @@ from matricula.orchestration.scheduling import (
 
 def test_single_group_gets_valid_schedule():
     groups = [Group(course_code="MA001", number="01", carnets=[f"26000{i}" for i in range(10)])]
-    schedules, alerts = schedule_groups(groups)
+    schedules, alerts, teacher_records, next_free_index = schedule_groups(groups)
     assert alerts == []
     assert len(schedules) == 1
     schedule = schedules[0]
-    assert schedule.teacher == "Profesor MA001-1"
+    assert schedule.teacher  # nombre real del pool, no un placeholder fijo
     assert schedule.classroom.startswith("AULA-")
     total_minutes = sum(b.duration_minutes for b in schedule.blocks)
     assert total_minutes == 200
+    # Un profesor generado, y el cursor avanzo exactamente en 1.
+    assert len(teacher_records) == 1
+    assert teacher_records[0].full_name == schedule.teacher
+    assert teacher_records[0].group_code == "MA001-01"
+    assert next_free_index == 1
 
 
 def test_two_groups_same_course_get_different_teachers_and_no_conflicts():
@@ -26,15 +31,26 @@ def test_two_groups_same_course_get_different_teachers_and_no_conflicts():
         Group(course_code="MA001", number="01", carnets=["260001"]),
         Group(course_code="MA001", number="02", carnets=["260002"]),
     ]
-    schedules, alerts = schedule_groups(groups)
+    schedules, alerts, teacher_records, next_free_index = schedule_groups(groups)
     assert alerts == []
     assert len(schedules) == 2
     teachers = {s.teacher for s in schedules}
     assert len(teachers) == 2  # nunca comparten profesor
+    assert next_free_index == 2
     # No pueden compartir aula+horario exactamente iguales.
     s1, s2 = schedules
     if s1.classroom == s2.classroom:
         assert not blocks_conflict(s1.blocks, s2.blocks)
+
+
+def test_schedule_groups_respects_teacher_start_index():
+    groups = [Group(course_code="MA001", number="01", carnets=["260001"])]
+    schedules, _, teacher_records, next_free_index = schedule_groups(
+        groups, teacher_start_index=5
+    )
+    assert teacher_records[0].pool_index == 5
+    assert next_free_index == 6
+    assert schedules[0].teacher == teacher_records[0].full_name
 
 
 def test_blocks_on_different_days_never_conflict():
@@ -57,7 +73,7 @@ def test_blocks_same_day_adjacent_hours_do_not_conflict():
 
 def test_schedule_stays_within_school_hours():
     groups = [Group(course_code="MA001", number="01", carnets=["260001"])]
-    schedules, _ = schedule_groups(groups)
+    schedules, _, _, _ = schedule_groups(groups)
     for block in schedules[0].blocks:
         end = block.start_hour + block.duration_minutes / 60
         assert 7 <= block.start_hour
@@ -87,7 +103,7 @@ def test_exhausting_all_classrooms_produces_alert_not_crash():
     groups = [
         Group(course_code="MA001", number=f"{i:02d}", carnets=[f"26{i:04d}"]) for i in range(1, 30)
     ]
-    schedules, alerts = schedule_groups(groups)
+    schedules, alerts, _, _ = schedule_groups(groups)
     assert len(schedules) + len(alerts) == len(groups)
     for alert in alerts:
         assert alert.status == "Sin horario"

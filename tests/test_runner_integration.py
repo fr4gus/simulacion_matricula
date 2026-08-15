@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from matricula.domain.names import NAME_POOL
 from matricula.domain.periods import Period
 from matricula.io.history import load_all_students
+from matricula.io.paths import profesores_file
+from matricula.io.teacher_md import read_teachers
 from matricula.orchestration.runner import run_period
 
 
@@ -30,6 +33,20 @@ def test_bootstrap_period_creates_first_ten_students_with_cuatrimestre_1(base_di
     assert set(period_record.rosters) == {"MA001-01", "CS002-01", "ES001-01"}
     for roster in period_record.rosters.values():
         assert len(roster) == 10
+
+    # Los 10 estudiantes nuevos toman los primeros 10 nombres del pool
+    # compartido, en orden; los 3 profesores generados (uno por materia)
+    # continuan el cursor sin repetir indices.
+    for i, student in enumerate(sorted(students, key=lambda s: s.carnet)):
+        nombre, apellidos = NAME_POOL[i]
+        assert (student.nombre, student.apellidos) == (nombre, apellidos)
+
+    registry = read_teachers(profesores_file(base_dir))
+    assert registry.next_free_index == 13  # 10 estudiantes + 3 profesores
+    assert len(registry.records) == 3
+    used_indices = [r.pool_index for r in registry.records]
+    assert used_indices == sorted(set(used_indices))  # sin repetidos
+    assert set(used_indices).isdisjoint(range(10))  # no pisan los de estudiantes
 
 
 def test_continuing_period_simulates_grades_and_respects_prerequisites(base_dir: Path):
@@ -73,3 +90,10 @@ def test_continuing_period_simulates_grades_and_respects_prerequisites(base_dir:
     # reaparecer en el archivo de 2026-02).
     for row in result.period_record.horario:
         assert row  # solo confirma que la seccion se genero de nuevo, no vacia si hubo demanda
+
+    # El cursor del pool de nombres continua entre corridas: no se reinicia
+    # a 0, y ningun indice de profesor se repite entre 2026-01 y 2026-02.
+    registry = read_teachers(profesores_file(base_dir))
+    used_indices = [r.pool_index for r in registry.records]
+    assert len(used_indices) == len(set(used_indices))
+    assert registry.next_free_index > 13  # avanzo mas alla de la corrida anterior

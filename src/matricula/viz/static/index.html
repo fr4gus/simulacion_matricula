@@ -75,6 +75,26 @@
     background: rgba(242, 184, 75, 0.15);
     color: var(--warn);
   }
+
+  #agent-section { display: none; margin-top: 2rem; }
+  #agent-log {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    max-height: 320px;
+    overflow-y: auto;
+    font-size: 0.85rem;
+  }
+  .agent-entry { padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
+  .agent-entry:last-child { border-bottom: none; }
+  .agent-entry .agent-time {
+    color: var(--muted);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    margin-right: 0.5rem;
+  }
+  .agent-entry .agent-text { white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -119,6 +139,11 @@
     </tbody>
   </table>
 
+  <div id="agent-section">
+    <h2>Agente <span class="status">(modo --agents)</span></h2>
+    <div id="agent-log"></div>
+  </div>
+
   <h2 style="margin-top: 2rem;">Censo de cuatrimestres</h2>
   <div class="phases" id="cuatrimestre-body">
     <div class="phase pending">
@@ -132,6 +157,8 @@
     const alertsBody = document.getElementById("alerts-body");
     const alertCountEl = document.getElementById("alert-count");
     const cuatrimestreBody = document.getElementById("cuatrimestre-body");
+    const agentSection = document.getElementById("agent-section");
+    const agentLog = document.getElementById("agent-log");
     let alertCount = 0;
     let alertsCleared = false;
 
@@ -151,6 +178,26 @@
       cuatrimestreBody.innerHTML =
         '<div class="phase pending"><div class="phase-name">Estado</div>' +
         '<div class="phase-value">esperando&hellip;</div></div>';
+      agentSection.style.display = "none";
+      agentLog.innerHTML = "";
+    }
+
+    function appendAgentMessage(text) {
+      // Solo se muestra esta seccion si la corrida usa --agents; el modo
+      // default nunca emite eventos "agent_message".
+      agentSection.style.display = "block";
+      const entry = document.createElement("div");
+      entry.className = "agent-entry";
+      const time = document.createElement("span");
+      time.className = "agent-time";
+      time.textContent = new Date().toLocaleTimeString();
+      const body = document.createElement("span");
+      body.className = "agent-text";
+      body.textContent = text;
+      entry.appendChild(time);
+      entry.appendChild(body);
+      agentLog.appendChild(entry);
+      agentLog.scrollTop = agentLog.scrollHeight;
     }
 
     function makePhaseCard(name, value, done) {
@@ -227,6 +274,9 @@
           break;
         case "alerts":
           appendAlerts(evt.alerts);
+          break;
+        case "agent_message":
+          appendAgentMessage(evt.text);
           break;
         case "run_completed":
           statusEl.textContent = "Corrida completada (exit " + evt.summary.exit_code + ")";
