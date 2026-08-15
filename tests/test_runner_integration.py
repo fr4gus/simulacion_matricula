@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from matricula.domain.models import GradeRecord, Student
 from matricula.domain.names import NAME_POOL
 from matricula.domain.periods import Period
-from matricula.io.history import load_all_students
-from matricula.io.paths import profesores_file
+from matricula.domain.study_plan import COURSES
+from matricula.io.history import count_graduated_students, load_all_students
+from matricula.io.paths import graduated_dir, profesores_file, students_dir
+from matricula.io.student_md import write_student
 from matricula.io.teacher_md import read_teachers
 from matricula.orchestration.runner import run_period
 
@@ -97,3 +100,38 @@ def test_continuing_period_simulates_grades_and_respects_prerequisites(base_dir:
     used_indices = [r.pool_index for r in registry.records]
     assert len(used_indices) == len(set(used_indices))
     assert registry.next_free_index > 13  # avanzo mas alla de la corrida anterior
+
+
+def test_students_who_finished_the_plan_are_migrated_to_graduated_before_the_next_run(
+    base_dir: Path,
+):
+    # Un estudiante que ya aprobo todas las materias del plan, escrito
+    # directamente en students/ (simula el resultado de una corrida previa).
+    period = Period.parse("2026-01")
+    graduate = Student(
+        carnet="260099",
+        apellidos="Rojas",
+        nombre="Marta",
+        grades=[
+            GradeRecord(period=period, course_code=c.code, course_name=c.name, grade=95)
+            for c in COURSES
+        ],
+    )
+    write_student(base_dir, graduate)
+
+    result = run_period(base_dir, period, seed=0, max_workers=1)
+
+    # No se pide nada a nombre del graduado -- build_request_course_codes
+    # devuelve [] para el una vez completo el plan -- y su expediente se
+    # movio fuera de students/ antes de correr el pipeline de este periodo.
+    assert not any(a.carnet == "260099" for a in result.summary.alerts)
+    assert not (students_dir(base_dir) / "260099.md").exists()
+    assert (graduated_dir(base_dir) / "260099.md").exists()
+
+    students = load_all_students(base_dir)
+    assert "260099" not in {s.carnet for s in students}
+    assert count_graduated_students(base_dir) == 1
+
+    # Una segunda corrida no vuelve a tocarlo: ya no esta en students/.
+    run_period(base_dir, Period.parse("2026-02"), seed=0, max_workers=1)
+    assert count_graduated_students(base_dir) == 1

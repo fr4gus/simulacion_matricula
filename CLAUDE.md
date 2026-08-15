@@ -28,7 +28,8 @@ section further down for the boundary between the two modes.
 - `io/` — Markdown read/write pairs: `markdown_tables.py` (shared pipe-table parser/renderer),
   `student_md.py` (`students/DDDDDD.md`), `period_md.py` (`periodos_lectivos/YYYY-PP.md`),
   `teacher_md.py` (`profesores.md` — teacher name registry + shared name-pool cursor),
-  `history.py` (latest stored period, load-all-students).
+  `history.py` (latest stored period, load-all-students, and
+  `migrate_graduated_students()`/`count_graduated_students()` — see "Graduated students" below).
 - `simulation/` — `grades.py` (seeded 80%-pass grade simulation), `requests.py` (pure
   next-cuatrimestre + retake request-building logic), `naming.py` (`allocate_names()` — pure,
   deterministic, cursor-based allocation from `NAME_POOL`, wraps around at 1000), `worker.py`
@@ -125,6 +126,29 @@ Both new students and new teachers draw from this **single shared pool**, never 
   the generator combines first/last names randomly) — "no repeats" here means no *pool index* is
   ever reused within the simulation's history, not that every rendered full name is distinct.
 
+## Graduated students
+
+Students who have passed every course in the study plan (`next_pending_cuatrimestre()` in
+`simulation/requests.py` returns `None`) stop being part of the active simulation:
+
+- `io/history.py::migrate_graduated_students(base_dir)` moves their `students/DDDDDD.md` file
+  (unmodified, just relocated) to `graduated/DDDDDD.md`. Both `orchestration/runner.py::run_period()`
+  and `agent_harness/orchestrator.py::run_period_with_agent()` call it first thing, before
+  `load_all_students()` — so a student who graduates *during* a run is still processed normally
+  for that run (grades simulated, matricula written), and only stops being loaded starting the
+  *next* run.
+- `graduated/` is purely historical and out-of-pipeline: `load_all_students()` never reads it, so
+  graduated students never occupy a `ProcessPoolExecutor` worker, are never asked to submit
+  requests (moot anyway — `build_request_course_codes()` already returns `[]` once
+  `next_pending_cuatrimestre()` is `None`), and never appear in the per-cuatrimestre census.
+- The `graduados` count in the `cuatrimestre_summary` event (consumed by `viz/`) is still the
+  full historical total — `io/history.py::count_graduated_students()` counts files in
+  `graduated/` directly (no parsing, no pipeline involvement) so the metric doesn't regress to 0
+  once graduates stop living in `students/`.
+- Carnets are never reused: a graduated student's carnet was already consumed by an earlier
+  period's `new_carnets()` call, so relocating the file doesn't risk a collision with future
+  carnet allocation.
+
 ## Domain model (from PRD.md)
 
 **Academic periods**: format `YYYY-PP` where `PP` in `{01, 02, 03}`. After `2026-03` comes `2027-01`. Do not confuse "periodo lectivo" (calendar term) with "cuatrimestre" (position in the study plan/curriculum).
@@ -159,8 +183,9 @@ Across simulated periods, the system should accumulate 50+ student profiles, wit
 
 ## Output artifacts
 
-- `students/DDDDDD.md` — one file per student: "Matricula" table + "expediente de notas" (grades) table, exact column formats are in `PRD.md` ("Expedientes de Estudiantes").
+- `students/DDDDDD.md` — one file per *active* student: "Matricula" table + "expediente de notas" (grades) table, exact column formats are in `PRD.md` ("Expedientes de Estudiantes"). Same format as `graduated/DDDDDD.md` — see below.
 - `periodos_lectivos/YYYY-PP.md` — one file per period containing: the schedule table (course, name, group, teacher, classroom, horario string like `L 07:00-08:40 / J 09:00-10:40`), one roster table per course+group combo (sorted by apellido then nombre, never mixing groups/courses), and the alerts table (carnet, course, reason, status). Exact table formats are in `PRD.md` ("Resultado de la matricula") — match them precisely, since these are the system's human-facing output.
+- `graduated/DDDDDD.md` — one file per student who has passed every course in the study plan, relocated here (unchanged) from `students/`. Historical only, outside the pipeline — see "Graduated students" above.
 - `profesores.md` — single file at `base_dir` root (not per-period): the shared name-pool cursor plus every teacher generated so far, across all periods. See "Shared name pool" above.
 
 

@@ -15,7 +15,12 @@ from matricula.config import NEW_STUDENTS_PER_PERIOD
 from matricula.domain.models import Alert, Request, RequestStatus, Student
 from matricula.domain.periods import Period
 from matricula.domain.study_plan import COURSES_BY_CODE, MAX_CUATRIMESTRE
-from matricula.io.history import latest_period, load_all_students
+from matricula.io.history import (
+    count_graduated_students,
+    latest_period,
+    load_all_students,
+    migrate_graduated_students,
+)
 from matricula.io.paths import profesores_file
 from matricula.io.period_md import HorarioRow, PeriodRecord, RosterEntry, write_period
 from matricula.io.student_md import write_student
@@ -59,15 +64,19 @@ def _emit_cuatrimestre_summary(emit: Callable[[dict], None], base_dir: Path) -> 
     eventos, no describe esta corrida sino el estado acumulado de toda la
     carrera hasta ahora.
     """
+    # Los graduados ya no viven en students/ (migrate_graduated_students los
+    # movio a graduated/ al inicio del run), asi que este censo solo ve
+    # estudiantes activos: cuatrimestre_counts nunca incluye graduados.
     census_students = load_all_students(base_dir)
     cuatrimestre_counts = {n: 0 for n in range(1, MAX_CUATRIMESTRE + 1)}
-    graduados = 0
     for student in census_students:
         cuatrimestre = next_pending_cuatrimestre(student)
-        if cuatrimestre is None:
-            graduados += 1
-        else:
+        # None (ya aprobo todo) no deberia ocurrir aqui -- se habria migrado
+        # a graduated/ antes de este censo -- pero se ignora defensivamente
+        # en vez de reventar si algun caller llama esto fuera de secuencia.
+        if cuatrimestre is not None:
             cuatrimestre_counts[cuatrimestre] += 1
+    graduados = count_graduated_students(base_dir)
 
     emit(
         {
@@ -76,7 +85,7 @@ def _emit_cuatrimestre_summary(emit: Callable[[dict], None], base_dir: Path) -> 
                 f"cuatrimestre_{n}": count for n, count in cuatrimestre_counts.items()
             },
             "graduados": graduados,
-            "total_students": len(census_students),
+            "total_students": len(census_students) + graduados,
         }
     )
 
@@ -117,6 +126,12 @@ def run_period(
     (tests, CLI sin --visualize) no cambian de comportamiento.
     """
     emit: Callable[[dict], None] = on_event or (lambda event: None)
+
+    # Antes de cargar el censo activo: mover a graduated/ a quien ya haya
+    # aprobado todo el plan en un run anterior. Deja de ocupar workers y de
+    # aparecer en el censo por cuatrimestre a partir de este run en adelante
+    # (ver io/history.py::migrate_graduated_students).
+    migrate_graduated_students(base_dir)
 
     prev_period = latest_period(base_dir)
 

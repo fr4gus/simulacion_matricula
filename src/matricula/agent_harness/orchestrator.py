@@ -31,7 +31,7 @@ from matricula.agent_harness.tools import build_tools
 from matricula.config import NEW_STUDENTS_PER_PERIOD
 from matricula.domain.models import Alert, Student
 from matricula.domain.periods import Period
-from matricula.io.history import latest_period, load_all_students
+from matricula.io.history import latest_period, load_all_students, migrate_graduated_students
 from matricula.io.paths import profesores_file
 from matricula.io.period_md import PeriodRecord, write_period
 from matricula.io.student_md import write_student
@@ -111,6 +111,10 @@ async def _run_period_with_agent_async(
 
     # --- Pasos 1-3 del PRD: mecanicos, sin decision de negocio -- se hacen
     # igual que en el modo default, antes de arrancar el agente. ---
+    # Mover a graduated/ a quien ya haya aprobado todo el plan en un run
+    # anterior, igual que orchestration.runner.run_period (ver
+    # io/history.py::migrate_graduated_students).
+    migrate_graduated_students(base_dir)
     prev_period = latest_period(base_dir)
     students = load_all_students(base_dir)
     students_by_carnet = {s.carnet: s for s in students}
