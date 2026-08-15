@@ -45,6 +45,8 @@
   .phase-value { font-size: 1.15rem; margin-top: 0.35rem; font-variant-numeric: tabular-nums; }
   .phase.pending .phase-value { color: var(--muted); }
   .phase.done .phase-value { color: var(--ok); }
+  .phase.error { border-color: var(--err); }
+  .phase.error .phase-value { color: var(--err); }
 
   .bar {
     height: 4px;
@@ -135,6 +137,11 @@
     </div>
   </div>
 
+  <div id="subagents-section" style="display: none; margin-bottom: 2rem;">
+    <h2>Subagentes en progreso <span id="subagent-batch-label" class="status"></span></h2>
+    <div class="phases" id="subagent-cards"></div>
+  </div>
+
   <h2>Alertas <span id="alert-count" class="status">(0)</span></h2>
   <table id="alerts-table">
     <thead>
@@ -165,8 +172,16 @@
     const cuatrimestreBody = document.getElementById("cuatrimestre-body");
     const agentSection = document.getElementById("agent-section");
     const agentLog = document.getElementById("agent-log");
+    const subagentsSection = document.getElementById("subagents-section");
+    const subagentCardsEl = document.getElementById("subagent-cards");
+    const subagentBatchLabel = document.getElementById("subagent-batch-label");
     let alertCount = 0;
     let alertsCleared = false;
+    // Tarjetas de subagente en progreso (modo skills, orquestacion via Task):
+    // Map<"role:id", HTMLElement> para poder actualizar una tarjeta existente
+    // (pending -> done/error) en vez de duplicarla si vuelve a llegar un
+    // evento para el mismo id.
+    const subagentCards = new Map();
 
     const PHASE_IDS = [
       "phase-pool", "phase-validation", "phase-demand",
@@ -187,6 +202,28 @@
       // El log de agentes NO se limpia aqui a proposito: debe acumular el
       // historial de mensajes de todas las corridas de esta sesion de viz,
       // no solo la corrida en curso. Ver appendAgentMessage.
+      subagentCards.clear();
+      subagentCardsEl.innerHTML = "";
+      subagentsSection.style.display = "none";
+      subagentBatchLabel.textContent = "";
+    }
+
+    function subagentKey(evt) {
+      return evt.role + ":" + evt.id;
+    }
+
+    function upsertSubagentCard(key, name, value, cls) {
+      let card = subagentCards.get(key);
+      if (!card) {
+        card = makePhaseCard(name, value, false);
+        subagentCards.set(key, card);
+        subagentCardsEl.appendChild(card);
+      } else {
+        card.querySelector(".phase-name").textContent = name;
+        card.querySelector(".phase-value").textContent = value;
+      }
+      card.className = "phase " + cls;
+      return card;
     }
 
     function appendAgentRunMarker(period) {
@@ -298,6 +335,33 @@
           break;
         case "agent_message":
           appendAgentMessage(evt.text);
+          break;
+        case "subagent_started":
+          subagentsSection.style.display = "block";
+          subagentBatchLabel.textContent =
+            "(lote " + evt.batch_index + ", hasta " + evt.batch_size + " en paralelo)";
+          upsertSubagentCard(
+            subagentKey(evt),
+            (evt.role === "estudiante" ? "Estudiante " : evt.role + " ") + evt.id,
+            "en curso…",
+            "pending"
+          );
+          break;
+        case "subagent_completed":
+          upsertSubagentCard(
+            subagentKey(evt),
+            (evt.role === "estudiante" ? "Estudiante " : evt.role + " ") + evt.id,
+            evt.status === "ok" ? "OK" : "Error",
+            evt.status === "ok" ? "done" : "error"
+          );
+          break;
+        case "phase_started":
+          subagentsSection.style.display = "none";
+          statusEl.textContent = "Fase en curso: " + evt.phase + "…";
+          statusEl.className = "status connected";
+          break;
+        case "phase_completed":
+          statusEl.textContent = "Fase completada: " + evt.phase;
           break;
         case "run_completed":
           statusEl.textContent = "Corrida completada (exit " + evt.summary.exit_code + ")";

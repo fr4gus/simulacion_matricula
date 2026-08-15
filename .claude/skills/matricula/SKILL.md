@@ -1,32 +1,44 @@
 ---
 name: matricula
-description: Ejecuta un periodo completo del proceso de matricula universitaria (PRD.md) leyendo y escribiendo directamente los archivos Markdown de students/, periodos_lectivos/ y profesores.md, sin invocar ningun script Python del proyecto -- toda la logica de negocio (validacion de prerrequisitos, demanda, formacion de grupos, horario, notas simuladas) se calcula con el razonamiento del propio agente segun las reglas transcritas en este skill. Usar cuando el usuario pida correr/simular un periodo lectivo, avanzar la matricula, o invoque "/matricula <periodo> [n-estudiantes] [overrides]".
+description: Ejecuta un periodo completo del proceso de matricula universitaria (PRD.md) orquestando subagentes especializados via Task -- despacha lotes de hasta 5 subagentes matricula-estudiante en paralelo para simular notas y construir solicitudes, y delega la fase secuencial de validacion/demanda/grupos/horario/asignacion a un unico subagente matricula-horario. El propio agente no calcula reglas de negocio de estudiante directamente: coordina, resuelve escenario.md, publica eventos al visualizador y persiste resultados. Usar cuando el usuario pida correr/simular un periodo lectivo, avanzar la matricula, o invoque "/matricula <periodo> [n-estudiantes] [overrides]".
 ---
 
 # matricula
 
-Este skill reimplementa en lenguaje natural el pipeline de 11 pasos del proceso de
-matricula descrito en `PRD.md`. **No uses Bash para invocar `python -m matricula`, ni
+Este skill orquesta el pipeline de 11 pasos del proceso de matrícula descrito en `PRD.md`
+delegando el cálculo pesado a subagentes especializados vía el `Task` tool, en vez de
+hacerlo todo en tu propio contexto. **No uses Bash para invocar `python -m matricula`, ni
 importes o ejecutes nada de `src/matricula/orchestration/`, `src/matricula/io/`,
-`src/matricula/simulation/` o `src/matricula/orchestration/runner.py`.** Ese es el modo
-"default" del proyecto (sin LLM) y debe seguir siendo la referencia determinista e
-independiente. Este skill es un camino paralelo: vos (el agente) leés los `.md`, hacés
-todos los cálculos, y escribís los `.md` de vuelta, siguiendo exactamente las reglas de
-abajo.
+`src/matricula/simulation/`.** Ese es el modo "default" del proyecto (sin LLM) y debe
+seguir siendo la referencia determinista e independiente. Este skill es un camino paralelo
+puramente en lenguaje natural — vos y tus subagentes leen/calculan/escriben siguiendo
+reglas explícitas, nunca código Python de negocio.
 
-`src/matricula/domain/study_plan.py` y `PRD.md` son la fuente normativa de las reglas de
-negocio — si algo en este documento y `PRD.md` difieren, `PRD.md` (incluida su sección
-"Aclaraciones") gana.
+`PRD.md` (incluida su sección "Aclaraciones") es la fuente normativa de las reglas de
+negocio — si algo acá difiere, `PRD.md` gana.
+
+## Tu rol: coordinador, no calculador
+
+Vos ejecutás directamente los pasos 0, 2, 3, 10 y 11 (operaciones de estado global barato:
+migración de graduados, verificación de consecutividad, generación de carnets/nombres,
+consolidación de alertas, persistencia de archivos). El cálculo de negocio por estudiante
+(pasos 1+4) y el pipeline de horario (pasos 5-9) los delegás a subagentes vía `Task`:
+
+- **`matricula-estudiante`** — un subagente por estudiante, hasta 5 en vuelo a la vez.
+  Simula notas del período anterior + construye la solicitud de este período.
+- **`matricula-horario`** — un único subagente, invocado una sola vez con la solicitud
+  consolidada de todos los estudiantes. Corre validación → demanda → grupos → horario →
+  asignación en una sola pasada secuencial (esas fases comparten estado global —cupos,
+  aulas, profesores, horario acumulado— que no se presta a paralelismo ni a más de un
+  subagente; ver `CLAUDE.md`, sección "Multi-agent skill topology").
 
 ## 1. Argumentos de invocación
 
 - `periodo` (requerido): `YYYY-PP`, `PP` en `{01, 02, 03}`.
 - `n_estudiantes` (opcional, default `10`): cantidad de estudiantes nuevos a crear en esta
-  corrida. Esto es un cambio de comportamiento respecto al PRD original (que fijaba 10
-  siempre) — ahora es parametrizable por invocación.
-- Overrides de escenario opcionales, formato `clave=valor` (ver tabla de la sección 2):
-  `max_aulas=`, `capacidad_aula=`, `cupo_grupo=`, `minimo_apertura=`,
-  `probabilidad_aprobacion=`, `nota_minima=`.
+  corrida.
+- Overrides de escenario opcionales, formato `clave=valor`: `max_aulas=`, `capacidad_aula=`,
+  `cupo_grupo=`, `minimo_apertura=`, `probabilidad_aprobacion=`, `nota_minima=`.
 - `viz_port` (opcional, default `8765`): puerto del visualizador standalone.
 
 Ejemplo: `/matricula 2026-01 10` · `/matricula 2026-03 10 max_aulas=2`
@@ -34,8 +46,7 @@ Ejemplo: `/matricula 2026-01 10` · `/matricula 2026-03 10 max_aulas=2`
 ## 2. Escenario: `escenario.md`
 
 Archivo opcional en la raíz de datos (`base_dir`, junto a `students/`, `periodos_lectivos/`,
-`profesores.md`), con los límites que hoy son constantes fijas en `PRD.md`/`config.py`.
-Formato:
+`profesores.md`). Formato:
 
 ```markdown
 # Escenario de Simulacion
@@ -65,61 +76,60 @@ Defaults PRD (usar si no hay archivo ni override):
 | `nota_minima` | 70 |
 | `estudiantes_nuevos_por_periodo` | 10 |
 
-**Precedencia por parámetro** (de mayor a menor prioridad):
-1. Override explícito pasado en la invocación de este skill (solo aplica a esa corrida).
-2. Valor en la columna `Valor` de `escenario.md`, si el archivo existe y menciona ese parámetro.
-3. Default PRD de la tabla de arriba.
+**Precedencia por parámetro** (de mayor a menor prioridad): override de invocación >
+`escenario.md` > default PRD.
 
-Reglas:
-- Si `escenario.md` no existe, **no lo crees automáticamente** — usá los defaults PRD y
-  seguí. Solo creá o reescribí el archivo si el usuario pide explícitamente "guardar este
-  escenario" o similar; en ese caso re-renderizá la tabla completa (nunca la parchees).
-- Los overrides de invocación son puntuales: no los escribas de vuelta a `escenario.md`
-  salvo pedido explícito del usuario.
-- Al arrancar, reportá en un mensaje al usuario y en el evento `run_started` (sección 3)
-  los valores efectivos que estás usando, marcando cuáles se desvían del default PRD y de
-  dónde salió cada desviación (archivo o override) — así una corrida con restricciones
-  reducidas queda trazable.
-- `n_estudiantes` de la invocación tiene la misma precedencia que cualquier otro override
-  sobre `estudiantes_nuevos_por_periodo`.
+Reglas: si no existe, no lo crees automáticamente. Los overrides de invocación son
+puntuales (no se persisten salvo pedido explícito). **Resolvé todos los valores efectivos
+acá, antes de despachar ningún subagente** — tanto `matricula-estudiante` como
+`matricula-horario` reciben estos valores ya resueltos en su prompt, nunca leen
+`escenario.md` por su cuenta (evita lecturas concurrentes inconsistentes de un archivo que
+podría no existir). Reportá al usuario y en `run_started` (sección 3) qué valores se
+desvían del default y de dónde salió cada desviación.
 
 ## 3. Protocolo de emisión de eventos al visualizador
 
-El humano ya debe haber corrido `python -m matricula viz` (o `matricula viz`) de antemano.
-Vos **no levantás el servidor** — solo publicás si detectás que está corriendo.
+El humano ya debe haber corrido `python -m matricula viz` de antemano. Vos **no levantás el
+servidor** — solo publicás si detectás que está corriendo. Los subagentes **nunca** publican
+eventos directamente (no conocen `viz_port` ni el protocolo HTTP) — siempre sos vos quien
+publica, después de recibir y parsear cada resultado.
 
 Al arrancar:
 ```bash
 curl -s -o /dev/null -w "%{http_code}" --max-time 1 http://localhost:<viz_port>/health
 ```
-Si no responde `200`, avisá una vez ("visualizador no disponible en el puerto <viz_port>,
-continuo sin publicar eventos") y seguí la corrida normalmente — nunca bloquees ni abortes
-por esto.
+Si no responde `200`, avisá una vez y seguí sin publicar más eventos — nunca bloquees ni
+abortes por esto.
 
-Si responde `200`, publicá en cada punto de progreso vía:
+Si responde `200`, publicá vía:
 ```bash
-curl -s -X POST http://localhost:<viz_port>/publish \
-  -H "Content-Type: application/json" \
-  -d '<json>'
+curl -s -X POST http://localhost:<viz_port>/publish -H "Content-Type: application/json" -d '<json>'
 ```
-Mismo vocabulario y forma que usa el modo Python (`orchestration/runner.py`), en este
-orden:
 
-- `run_started` — `{"type": "run_started", "period": "2026-01", "total_students": 20}`
-  (`total_students` = estudiantes activos existentes + nuevos de esta corrida).
-- `pool_progress` — uno por estudiante procesado (notas simuladas + solicitud construida):
-  `{"type": "pool_progress", "completed": N, "total": M}`.
-- `pool_completed` — `{"type": "pool_completed", "completed": M, "total": M, "errors": 0}`.
-- `validation_done` — `{"type": "validation_done", "valid": N, "rejected": N}`.
-- `demand_done` — `{"type": "demand_done", "opened": N, "closed": N}`.
-- `grouping_done` — `{"type": "grouping_done", "groups_formed": N}`.
-- `scheduling_done` — `{"type": "scheduling_done", "scheduled": N, "unschedulable": N}`.
-- `assignment_done` — `{"type": "assignment_done", "assigned_ok": N, "conflicts": N}`.
-- `alerts` — solo las alertas **nuevas** de la fase que acaba de terminar (no acumuladas):
-  `{"type": "alerts", "alerts": [{"carnet": "...", "course_code": "...", "reason": "...", "status": "..."}]}`.
-  Emitilo después de `validation_done`, `demand_done`, `scheduling_done` y
-  `assignment_done` si esa fase generó alertas nuevas.
-- `run_completed` — al final:
+En este orden:
+
+- `run_started` — `{"type": "run_started", "period": "2026-01", "total_students": 20}`.
+- Por cada `Task` de `matricula-estudiante` que despaches (ver sección 4):
+  - Justo antes: `{"type": "subagent_started", "role": "estudiante", "id": "260007", "batch_index": 2, "batch_size": 5}`.
+  - Justo después de parsear su resultado: `{"type": "subagent_completed", "role": "estudiante", "id": "260007", "status": "ok", "batch_index": 2}`
+    (`status`: `"ok"` o `"error"` si devolvió `error != null` o no fue parseable).
+  - Inmediatamente después: `{"type": "pool_progress", "completed": N, "total": M}` (cadencia
+    igual a la del modo Python — un tick por estudiante procesado).
+- `pool_completed` — `{"type": "pool_completed", "completed": M, "total": M, "errors": N}`
+  (`errors` = subagentes que devolvieron `status: "error"`).
+- Antes de despachar `matricula-horario`: `{"type": "phase_started", "phase": "horario_y_asignacion"}`.
+- Al recibir su resultado, en orden: `validation_done`, `alerts` (si las hay),
+  `demand_done`, `alerts`, `grouping_done`, `scheduling_done`, `alerts`,
+  `assignment_done`, `alerts` — mismos payloads que el modo Python:
+  - `{"type": "validation_done", "valid": N, "rejected": N}`
+  - `{"type": "demand_done", "opened": N, "closed": N}`
+  - `{"type": "grouping_done", "groups_formed": N}`
+  - `{"type": "scheduling_done", "scheduled": N, "unschedulable": N}`
+  - `{"type": "assignment_done", "assigned_ok": N, "conflicts": N}`
+  - `{"type": "alerts", "alerts": [{"carnet": "...", "course_code": "...", "reason": "...", "status": "..."}]}`
+    (solo las alertas nuevas de cada fase, no acumuladas)
+  - `{"type": "phase_completed", "phase": "horario_y_asignacion"}`
+- `run_completed`:
   ```json
   {"type": "run_completed", "summary": {
     "period": "2026-01", "students_created": 10, "requests_valid": N,
@@ -127,189 +137,109 @@ orden:
     "groups_formed": N, "total_alerts": N, "exit_code": 0
   }}
   ```
-  `exit_code`: `0` si no hay alertas sistémicas (ver sección 6), `1` si las hay.
-- `cuatrimestre_summary` — censo global tras persistir (todos los estudiantes activos en
-  `students/`, agrupados por cuatrimestre pendiente, más el total de graduados):
+  `exit_code`: `0` si no hay alertas sistémicas (ver sección 7), `1` si las hay.
+- `cuatrimestre_summary` — censo global tras persistir:
   ```json
   {"type": "cuatrimestre_summary", "cuatrimestre_counts": {
     "cuatrimestre_1": N, "cuatrimestre_2": N, "cuatrimestre_3": N, "cuatrimestre_4": N},
     "graduados": N, "total_students": N}
   ```
 
-No emitas `agent_message` salvo que quieras narrar algo puntual al humano — el frontend lo
-soporta, pero no es parte del contrato mínimo.
-
 ## 4. Algoritmo paso a paso
 
-Determiná primero `base_dir` = directorio de trabajo actual (cwd) desde donde te invocaron.
-Todas las rutas de abajo son relativas a `base_dir`.
+Determiná primero `base_dir` = directorio de trabajo actual (cwd). Todas las rutas de abajo
+son relativas a `base_dir`.
 
 ### Paso 0 — Migrar graduados
-Para cada `students/DDDDDD.md`, calculá el "siguiente cuatrimestre pendiente" (ver Paso 4).
-Si es `null` (aprobó las 12 materias del plan, todas con nota ≥ `nota_minima` en su intento
-más reciente), movés el archivo **sin modificar su contenido** a `graduated/DDDDDD.md`
-(creá `graduated/` si no existe). Hacé esto **antes** de cargar el censo activo del resto
-del pipeline — un graduado no debe ocupar cupo ni recibir solicitudes esta corrida.
-
-### Paso 1 — Simular notas del período anterior
-Determiná el período anterior (el que precede a `periodo` en la secuencia `01→02→03→año+1
-01`). Para cada estudiante activo (`students/*.md`, ya sin los recién migrados) que tenga
-una fila en su tabla "Matricula" con ese período anterior, generá una nota nueva en su
-"Expediente de Notas" por cada materia matriculada entonces:
-- Con probabilidad `probabilidad_aprobacion`, aprueba: nota aleatoria en `[nota_minima, 100]`.
-- Si no, reprueba: nota aleatoria en `[0, nota_minima - 1]`.
-
-Variá los valores entre estudiantes y materias (no uses siempre el mismo número). Esta
-corrida no tiene semilla determinista — a diferencia del modo Python, el resultado no es
-reproducible byte a byte entre corridas; es una diferencia de diseño aceptada.
-
-Si `periodo` es la primera corrida sobre este `base_dir` (no hay `periodos_lectivos/*.md`
-previos), no hay período anterior que simular — saltá este paso.
+Para cada `students/DDDDDD.md`, calculá el "siguiente cuatrimestre pendiente" (mismo
+criterio que el Paso B de `matricula-estudiante`: primer cuatrimestre 1→4 donde no todas
+sus materias tienen nota ≥ `nota_minima` en el intento más reciente). Si ya aprobó los 4
+cuatrimestres, movés el archivo **sin modificar su contenido** a `graduated/DDDDDD.md`
+(creá `graduated/` si no existe). Hacé esto **antes** de cargar el censo activo.
 
 ### Paso 2 — Verificar consecutividad
-Listá `periodos_lectivos/*.md` existentes, tomá el de período más reciente (orden
-`YYYY-PP` ascendente, con `01<02<03` y el año como primer criterio). Si existe y `periodo`
-no es exactamente su siguiente consecutivo (`03` pasa a `01` del año siguiente), **detené
-la ejecución sin escribir nada** y reportá el error al usuario (mismo criterio que
-`domain/periods.py::is_consecutive`). Si no existe ningún período previo, esta es la
-corrida inicializadora.
+Listá `periodos_lectivos/*.md` existentes, tomá el de período más reciente. Si existe y
+`periodo` no es exactamente su siguiente consecutivo, **detené la ejecución sin escribir
+nada** y reportá el error. Si no existe ningún período previo, esta es la corrida
+inicializadora.
 
 ### Paso 3 — Crear estudiantes nuevos
-Prefijo de carnet = últimos 2 dígitos del año de `periodo` (`2026` → `26`). Buscá, entre
-todos los `students/*.md` existentes (activos y en `graduated/`, para nunca reusar un
-carnet), el máximo secuencial ya usado con ese prefijo; si no hay ninguno, empezá en
-`0001`. Creá `n_estudiantes` carnets consecutivos de 6 dígitos (`prefijo + secuencial de 4
-dígitos`).
+Prefijo de carnet = últimos 2 dígitos del año de `periodo`. Buscá, entre todos los
+`students/*.md` existentes (activos y en `graduated/`), el máximo secuencial ya usado con
+ese prefijo; si no hay ninguno, empezá en `0001`. Creá `n_estudiantes` carnets consecutivos
+de 6 dígitos.
 
-Nombres: abrí `profesores.md` (raíz del repo, no `base_dir` de datos si son distintos —
-normalmente el mismo), leé la línea "Proximo indice libre del pool: N" (cursor). Abrí
-`nombres.md` (raíz del repo), que tiene 1000 líneas numeradas "Nombre Apellido". Para cada
-estudiante nuevo `i` (0-indexado), el nombre completo es la línea en la posición
-`(N + i) mod 1000` (wraparound, nunca falla por agotamiento). Separá esa línea en `nombre`
-(primera palabra o palabras hasta donde corresponda) y `apellidos` (resto) — seguí el
-mismo criterio de partición que ya uses para nombres de profesor (ver Paso 8). Al terminar
-de asignar todos los nombres de estudiantes de este paso, el cursor avanza a `N +
-n_estudiantes`; ese valor intermedio se usa luego como punto de partida para los nombres de
-profesor del Paso 8 (mismo pool compartido, un solo cursor, nunca reutilizado).
+Nombres: abrí `profesores.md` (raíz del repo), leé "Proximo indice libre del pool: N". Abrí
+`nombres.md` (1000 líneas "Nombre Apellido"). Para cada estudiante nuevo `i` (0-indexado),
+el nombre es la línea en la posición `(N + i) mod 1000`. El cursor avanza a `N +
+n_estudiantes` — ese valor es el `teacher_start_index` que le vas a pasar a
+`matricula-horario` en el Paso 8 (mismo pool compartido, un solo cursor).
 
-### Paso 4 — Construir solicitudes por estudiante
-Para cada estudiante activo (existentes + nuevos):
-- **Nuevo**: solicita las 3 materias de cuatrimestre 1 (`MA001`, `CS002`, `ES001`).
-- **Continuante**: calculá `passed` = códigos con nota ≥ `nota_minima` en su intento más
-  reciente por código. Calculá `retakes` = códigos cuyo intento más reciente reprobó
-  (nota < `nota_minima`) y que no estén en `passed` (por si se recuperó en un intento
-  posterior). Calculá el "siguiente cuatrimestre pendiente": el primer cuatrimestre
-  (1→4, en orden) donde no todas sus materias están en `passed`; si los 4 cuatrimestres
-  están completos, el estudiante ya se migró en el Paso 0 y no debería llegar aquí.
-  La solicitud = `retakes` (primero, sin duplicados) + materias nuevas de ese cuatrimestre
-  pendiente que no estén ya en `passed`, sin duplicar. Nunca solicita más de un
-  cuatrimestre adelante aunque cumpla prerrequisitos de más adelante.
+### Pasos 1+4 — Despacho de subagentes `matricula-estudiante`
 
-Plan de estudios completo (transcribir tal cual, es la fuente normativa):
+Armá la lista completa de estudiantes activos de esta corrida (los nuevos del Paso 3 +
+todos los continuantes cargados de `students/*.md`, ya sin los migrados en el Paso 0).
+Determiná el período anterior (o `null` si es la corrida inicializadora).
 
-| Cuatrimestre | Código | Nombre | Prerrequisitos |
-| --- | --- | --- | --- |
-| 1 | MA001 | Matematicas I | — |
-| 1 | CS002 | Intro a Compu | — |
-| 1 | ES001 | Humanidades | — |
-| 2 | CS003 | Programacion I | MA001, CS002 |
-| 2 | MA002 | Matematicas II | MA001 |
-| 2 | ES010 | Ingles I | — |
-| 3 | CS004 | Programacion II | CS003 |
-| 3 | MA003 | Matematicas III | MA002 |
-| 3 | ES020 | Ingles II | ES010 |
-| 4 | CS005 | Algoritmos | CS004 |
-| 4 | MA004 | Matematicas IV | MA003 |
-| 4 | CS020 | Redes | — |
+Dividí la lista en lotes de tamaño máximo 5. Por cada lote, en un único turno/mensaje:
+1. Para cada estudiante del lote, publicá `subagent_started` (ver sección 3).
+2. Invocá el `Task` tool una vez por estudiante del lote — **todas las invocaciones del
+   lote en el mismo mensaje**, no una por una con turnos intermedios — apuntando al skill
+   `matricula-estudiante`, con el prompt conteniendo: `carnet`, snapshot de su Matricula +
+   Expediente de Notas actuales, `periodo`, `periodo_anterior`, `probabilidad_aprobacion` y
+   `nota_minima` efectivos, y el plan de estudios.
+3. Esperá a que **todas** las invocaciones del lote devuelvan resultado antes de armar el
+   siguiente lote.
+4. Por cada resultado, parseá el bloque ` ```student-result `. Si no es parseable (subagente
+   no devolvió el bloque esperado, crash, timeout), tratalo como si hubiera devuelto
+   `"error": "Subagente no devolvio resultado valido"`. Publicá `subagent_completed` con
+   `status: "ok"` o `"error"`, seguido de `pool_progress`.
+5. Si `error != null`: agregá una alerta `{carnet, course_code: "", reason: "Error interno:
+   <error>", status: "Error"}` para ese estudiante, y sus `requested_course_codes` quedan
+   vacíos (no participa en las fases siguientes). **Nunca dejes que esto tumbe el lote ni la
+   corrida** — seguí con el resto.
+6. Si `error == null`: agregá sus `new_grades` al expediente en memoria del estudiante (se
+   persistirán en el Paso 11), y guardá sus `requested_course_codes` para el despacho a
+   `matricula-horario`.
 
-### Paso 5 — Validar cada solicitud
-Para cada solicitud de cada estudiante, en orden, evaluá (primer motivo que aplique gana):
-1. Si el código ya apareció antes en la misma solicitud de este estudiante → rechazada,
-   motivo `"Solicitud duplicada"`.
-2. Si el código no existe en el plan de estudios → rechazada, motivo `"Materia inexistente
-   en el plan de estudios"`.
-3. Si el código ya está en `passed` (nota ≥ `nota_minima`) y **no** es un retake (es decir,
-   el intento más reciente ya aprobó) → rechazada, motivo `"Materia ya aprobada"`.
-4. Si no se cumplen todos los prerrequisitos del código (cada prerrequisito debe estar en
-   `passed`) → rechazada, motivo `"Prerrequisito no cumplido"`.
-5. Si no — válida.
+Al agotar todos los lotes, publicá `pool_completed` con el conteo total de errores.
 
-Cada rechazo genera una alerta: `{carnet, course_code, motivo, status: "Rechazada"}`.
+### Pasos 5-9 — Despacho del subagente `matricula-horario`
 
-### Paso 6 — Demanda y apertura/cierre
-Agrupá las solicitudes válidas por código de materia. Una materia con menos de
-`minimo_apertura` solicitudes válidas se cierra: cada una de esas solicitudes se marca
-rechazada con motivo `"Materia cerrada: menos de X solicitudes validas"` (usá el valor
-efectivo de `minimo_apertura`, no el literal 5), alerta status `"Rechazada"`. Las materias
-con `minimo_apertura` o más solicitudes válidas quedan abiertas.
+Publicá `phase_started` (fase `"horario_y_asignacion"`). Armá el prompt consolidado:
+lista de `{carnet, requested_course_codes, promedio_historico}` de todos los estudiantes
+con solicitud no vacía, los parámetros de escenario efectivos (`cupo_grupo`,
+`minimo_apertura`, `max_aulas`, `capacidad_aula`), `periodo`, `teacher_start_index` (cursor
+del Paso 3), el contenido completo de `nombres.md`, y el plan de estudios.
 
-### Paso 7 — Formación de grupos
-Para cada materia abierta: ordená a los solicitantes admitidos por prioridad — promedio
-histórico de notas descendente, empate por carnet ascendente (más antiguo primero) — esto
-solo importa si en algún momento hay más solicitantes que cupo total disponible; en este
-sistema no hay techo de grupos, así que en la práctica todos entran. Formá
-`ceil(total / cupo_grupo)` grupos, numerados `01`, `02`, ... Repartí los admitidos entre
-los grupos de forma balanceada (diferencia máxima de 1 estudiante entre grupos, p.ej.
-round-robin) — el reparto a un grupo específico es libre, no usa el ranking de prioridad
-para decidir la posición (Aclaración PRD #3).
+Invocá el `Task` tool **una sola vez**, apuntando a `matricula-horario`. Esperá su
+resultado y parseá el bloque ` ```horario-result `.
 
-### Paso 8 — Horario (profesor + aula + bloques)
-Procesá los grupos en orden fijo (código de materia, luego número de grupo). Cada grupo
-nuevo recibe un profesor nuevo (nunca compartido, ni entre grupos de la misma materia):
-tomá el siguiente nombre del pool compartido (mismo mecanismo que Paso 3, continuando el
-cursor donde quedó tras los estudiantes), agregalo a `profesores.md` con su
-`(indice, nombre completo, materia-grupo)`.
+Si `error != null` o el bloque no es parseable: **detené la corrida sin persistir ningún
+archivo** y reportá el error al usuario — es una falla sistémica equivalente a período no
+consecutivo, no una alerta rutinaria.
 
-Para el bloque horario, probá candidatos en este orden fijo hasta encontrar uno libre de
-choques de profesor y de aula:
-1. Bloques continuos de 200 min, un día (`L`, `M`, `X`, `J`, `V` en ese orden), hora de
-   inicio en `{07,09,11,13,15}` (solo horas donde `inicio + 200min ≤ 17:00`).
-2. Si ninguno libre, bloques divididos: dos bloques de 100 min en dos días **distintos**
-   (sin restricción de no-adyacencia — lunes+martes es válido), cada uno con hora de inicio
-   en `{07,09,11,13,15}` (`inicio + 100min ≤ 17:00`).
-
-Un profesor nunca puede tener dos grupos al mismo tiempo (es nuevo, así que solo compite
-consigo mismo dentro de este grupo — no hay conflicto de profesor real, cada grupo tiene su
-propio profesor). Un aula (`AULA-DDD`, `DDD` desde 100, hasta `max_aulas` aulas —
-`AULA-100`..`AULA-<099+max_aulas>`) no puede alojar dos grupos en el mismo bloque; llevá la
-ocupación acumulada por aula durante toda esta corrida. Como preferencia blanda (no regla
-dura), preferí un horario que tampoco choque con ningún bloque ya asignado a *otro* grupo
-en esta corrida — minimiza que un estudiante con varias materias del mismo cuatrimestre
-tenga choques en el Paso 9; si no hay ningún candidato así, usá el primero que solo respete
-profesor/aula.
-
-Si un grupo no encuentra ninguna combinación de aula+horario libre de conflictos (esto es
-más probable con `max_aulas` reducido), **no le asignes horario**, generá alerta
-`{carnet: "", course_code: "<MATERIA>-<GRUPO>", motivo: "No fue posible asignar
-horario/aula/profesor sin conflictos", status: "Sin horario"}`, y continuá con el resto de
-grupos — nunca abortes la corrida completa (Aclaración PRD #5).
-
-Formato del string de horario (columna "Horario" del período): `"L 07:00-08:40"` para un
-bloque, `"L 07:00-08:40 / J 09:00-10:40"` para dos bloques separados por ` / ` (hora de fin
-= hora inicio + duración, formato `HH:MM`).
-
-### Paso 9 — Asignación individual
-Para cada estudiante admitido (orden de carnet ascendente), y para cada materia+grupo al
-que fue admitido (orden de código de materia): si el grupo no tiene horario asignado
-(Paso 8 generó alerta) → alerta `{carnet, course_code, motivo: "Grupo sin horario
-asignado", status: "Sin asignar"}`, no lo matricules. Si el bloque del grupo choca con
-algún bloque ya acumulado en el horario individual de este estudiante en esta misma
-corrida → alerta `{carnet, course_code, motivo: "Conflicto de horario con otra materia
-asignada al estudiante", status: "Sin asignar"}`, no lo matricules. Si no hay conflicto,
-agregá el bloque al horario acumulado del estudiante y matriculalo (esto es lo que va a la
-tabla "Matricula" del estudiante y al roster del período).
+Si es válido: extraé `alerts`, `open_courses`, `closed_courses`, `groups_formed`,
+`schedules`, `rosters`, `matricula_by_carnet`, `next_teacher_index`,
+`new_teacher_records`. Publicá en orden `validation_done`+`alerts`, `demand_done`+`alerts`,
+`grouping_done`, `scheduling_done`+`alerts`, `assignment_done`+`alerts` (separando las
+alertas por la fase que las originó, usando su `reason`/`status` para clasificarlas —
+`"Rechazada"` con motivo de prerrequisito/duplicada/ya aprobada/materia inexistente →
+validación; `"Rechazada"` por cierre → demanda; `"Sin horario"` → scheduling; `"Sin
+asignar"` → assignment), luego `phase_completed`.
 
 ### Paso 10 — Reunir alertas
-Juntá todas las alertas generadas en los Pasos 5, 6, 8 y 9 (más cualquier caso no cubierto
-explícitamente por estas reglas que decidas tratar como alerta — ver sección 6).
+Juntá las alertas de los subagentes de estudiante (errores internos) con las de
+`matricula-horario` (pasos 5,6,8,9).
 
 ### Paso 11 — Persistir
 Re-renderizá completo (nunca parchees texto) cada archivo tocado:
-- `students/DDDDDD.md` de todo estudiante activo de esta corrida (nuevo o existente con
-  cambios de notas/matrícula) — formato exacto en sección 5.
-- `periodos_lectivos/YYYY-PP.md` con horario, rosters por materia+grupo, alertas.
-- `profesores.md` con el cursor final del pool (avanzado por estudiantes + profesores de
-  esta corrida) y el registro acumulado (profesores previos + los nuevos de esta corrida).
+- `students/DDDDDD.md` de todo estudiante de esta corrida: notas nuevas (de
+  `matricula-estudiante`) + entradas de matrícula (de `matricula_by_carnet` del resultado de
+  `matricula-horario`) — formato exacto en sección 5.
+- `periodos_lectivos/YYYY-PP.md` con `schedules`, `rosters`, alertas consolidadas.
+- `profesores.md` con `next_teacher_index` como nuevo cursor y el registro acumulado
+  (profesores previos + `new_teacher_records`).
 
 ## 5. Formato exacto de cada archivo de salida
 
@@ -331,10 +261,9 @@ Re-renderizá completo (nunca parchees texto) cada archivo tocado:
 | 2026-01         | MA001          | Matematicas I   | 85                |
 ```
 
-El carnet va solo en el nombre de archivo y el encabezado `# Estudiante DDDDDD`, no hace
-falta repetirlo en el cuerpo. Si un estudiante no tiene aún expediente de notas (recién
-creado), dejá la tabla de "Expediente de Notas" con solo el encabezado y la fila
-separadora, sin filas de datos.
+El carnet va solo en el nombre de archivo y el encabezado `# Estudiante DDDDDD`. Si un
+estudiante no tiene aún expediente de notas (recién creado), dejá esa tabla con solo el
+encabezado y la fila separadora.
 
 ### `periodos_lectivos/YYYY-PP.md`
 
@@ -363,8 +292,7 @@ separadora, sin filas de datos.
 ```
 
 Una subsección `### CODIGO - Grupo NN` por cada combinación materia+grupo que tenga horario
-asignado, en orden materia luego grupo; roster ordenado por apellido, luego nombre. Nunca
-mezcles estudiantes de distintos grupos/materias en la misma tabla.
+asignado, en orden materia luego grupo; roster ordenado por apellido, luego nombre.
 
 ### `profesores.md`
 
@@ -378,9 +306,7 @@ Proximo indice libre del pool: 7
 | 3           | Colson Bridges    | MA001-01      |
 ```
 
-`Indice Pool` es la posición 0-999 en `nombres.md` de donde salió ese nombre — la clave que
-evita reusar el mismo índice dos veces. Re-renderizá el archivo completo (cursor +
-registro acumulado, no solo lo nuevo de esta corrida) cada vez.
+Re-renderizá el archivo completo (cursor + registro acumulado) cada vez.
 
 ### `graduated/DDDDDD.md`
 
@@ -388,35 +314,35 @@ Mismo formato que `students/DDDDDD.md`, solo relocalizado sin modificar contenid
 
 ### Formato de tabla
 
-Pipe tables estándar: `| Col1 | Col2 |`, fila separadora `| --- | --- |` (o con guiones
-alineados al ancho de columna, como en los ejemplos de arriba — cualquiera de las dos
-formas es válida). El criterio de aceptación es que el archivo siga siendo **parseable
-como tabla Markdown por el modo default del proyecto** si alguien corre `python -m
-matricula run` sobre el mismo directorio después — no hace falta paridad byte a byte, pero
-sí headers exactos (mismo texto, mismo orden de columnas) y estructura de secciones `##`/`###`.
+Pipe tables estándar. Criterio de aceptación: el archivo debe seguir siendo **parseable
+como tabla Markdown por el modo default del proyecto** — headers exactos, estructura de
+secciones `##`/`###` idéntica a los ejemplos.
 
-## 6. Manejo de errores y alertas
+## 6. Manejo de subagentes que fallan
 
-Formato de alerta: `(carnet, codigo_materia, motivo, estado)`. Casos:
-- Prerrequisito no cumplido / materia inexistente / ya aprobada / duplicada → `"Rechazada"`.
-- Curso cerrado por baja demanda → `"Rechazada"`.
-- Grupo sin horario asignable → `"Sin horario"`.
-- Conflicto de horario individual insalvable → `"Sin asignar"`.
-- Cualquier caso que no puedas resolver con estas reglas (dato inconsistente, ambigüedad no
-  cubierta): generá una alerta con motivo descriptivo y estado `"Error"`, y **seguí con el
-  resto del período** — nunca abortes toda la corrida por un caso aislado.
-- Único caso que sí aborta sin escribir nada: período no consecutivo (Paso 2).
+- `matricula-estudiante` con `error != null` o resultado no parseable → alerta
+  `status: "Error"` para ese estudiante únicamente, el resto de la corrida continúa
+  normalmente (mismo contrato que `try/except` alrededor de `process_student` en el modo
+  Python: un estudiante roto nunca tumba el lote ni la corrida).
+- `matricula-horario` con `error != null` o resultado no parseable → falla sistémica de
+  toda la corrida: detené la ejecución, no persistas ningún archivo, reportá el error al
+  usuario. Es el único caso de falla de subagente que aborta (junto con período no
+  consecutivo del Paso 2).
 
-Alertas "sistémicas" (afectan si la corrida se reporta como limpia o no): las de horario
-(`"No fue posible asignar horario/aula/profesor sin conflictos"`, `"Conflicto de horario con
-otra materia asignada al estudiante"`, `"Grupo sin horario asignado"`). El resto
-(rechazos por prerrequisito, curso cerrado, etc.) son rutinarias — no implican que la
-corrida haya fallado.
+## 7. Manejo de errores y alertas (contenido, no de subagente)
 
-## 7. Criterio de éxito / salida
+Formato de alerta: `(carnet, codigo_materia, motivo, estado)`. Casos y estados:
+`"Rechazada"` (prerrequisito, materia inexistente/ya aprobada/duplicada, curso cerrado),
+`"Sin horario"` (grupo sin horario asignable), `"Sin asignar"` (conflicto de horario
+individual insalvable), `"Error"` (subagente de estudiante con error interno).
+
+Alertas "sistémicas" (afectan si la corrida se reporta como limpia): las de horario (`"No
+fue posible asignar horario/aula/profesor sin conflictos"`, `"Conflicto de horario con otra
+materia asignada al estudiante"`, `"Grupo sin horario asignado"`). El resto son rutinarias.
+
+## 8. Criterio de éxito / salida
 
 Al terminar, escribí un resumen en texto al usuario: período, estudiantes creados,
 solicitudes válidas/rechazadas, cursos abiertos/cerrados, grupos formados, total de
-alertas, y si hubo alertas sistémicas (equivalente al exit code 1 del modo Python) o la
-corrida quedó limpia (equivalente a exit code 0). Publicá el evento `run_completed` y
-`cuatrimestre_summary` si el visualizador está activo (sección 3).
+alertas, y si hubo alertas sistémicas o la corrida quedó limpia. Publicá `run_completed` y
+`cuatrimestre_summary` si el visualizador está activo.

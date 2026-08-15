@@ -77,15 +77,16 @@ modes:
 
 `.claude/skills/matricula/SKILL.md` is a second, independent way to run a period: instead
 of `orchestration/*` + `runner.run_period()`, a Claude Code/Codex agent reads the skill's
-instructions and runs the whole 11-step pipeline itself — reading and writing
-`students/*.md`, `periodos_lectivos/*.md`, and `profesores.md` directly with its own
-reasoning, per business rules transcribed in the skill from `PRD.md`. This is **not** a
-thin wrapper: the skill does not call into `orchestration/*`, `io/*`, or `simulation/*` at
-all, and must not — the whole point is exploring an orchestration model driven purely by
-skill instructions, portable across agent harnesses (Claude Code or Codex), with zero
-Python business logic. It replaced an earlier `--agents` mode (`agent_harness/`, Claude
-Agent SDK, tool-call wrappers around `orchestration/*`) that has been removed entirely from
-this branch.
+instructions and runs the 11-step pipeline by **orchestrating subagents** — reading and
+writing `students/*.md`, `periodos_lectivos/*.md`, and `profesores.md` directly with its
+own reasoning (and its subagents'), per business rules transcribed in the skills from
+`PRD.md`. This is **not** a thin wrapper: no skill in this mode calls into
+`orchestration/*`, `io/*`, or `simulation/*` at all, and must not — the whole point is
+exploring an orchestration model driven purely by skill instructions and real subagent
+delegation (via the `Task` tool), portable across agent harnesses (Claude Code or Codex),
+with zero Python business logic. It replaced an earlier `--agents` mode (`agent_harness/`,
+Claude Agent SDK, tool-call wrappers around `orchestration/*`) that has been removed
+entirely from this branch.
 
 - **Invocation**: the skill takes `periodo` (required) and `n_estudiantes` (optional,
   default 10 — configurable per PRD.md's new "Nota de arquitectura" section, unlike the
@@ -93,20 +94,77 @@ this branch.
 - **`escenario.md`** (base_dir root, alongside `profesores.md`): an optional Markdown table
   of previously-fixed PRD constants (`max_aulas`, `capacidad_aula`, `cupo_grupo`,
   `minimo_apertura`, `probabilidad_aprobacion`, `nota_minima`,
-  `estudiantes_nuevos_por_periodo`) that the skill reads at the start of a run. Precedence:
-  explicit invocation override > `escenario.md` value > PRD default hardcoded in the skill.
-  This exists specifically to let scenarios vary classroom/teacher capacity and stress-test
-  the pipeline (e.g. `max_aulas=2` to force unschedulable-group alerts).
-- **Visualizer integration**: the skill never starts the `viz/` server — the human must
-  already have `matricula viz` running. It health-checks `GET /health` and, if up, POSTs
-  the same event vocabulary `runner.py` emits (`run_started`, `pool_progress`,
-  `pool_completed`, `validation_done`, `demand_done`, `grouping_done`, `scheduling_done`,
-  `assignment_done`, `alerts`, `run_completed`, `cuatrimestre_summary`) to `POST /publish`
-  via `curl`, tolerating a down/missing server the same way `viz/sink.py::HttpSink` does
-  (warn once, never block or abort the run).
+  `estudiantes_nuevos_por_periodo`) that the orchestrator skill resolves once, before
+  dispatching any subagent, and passes down as already-resolved values in every subagent
+  prompt (subagents never read `escenario.md` themselves). Precedence: explicit invocation
+  override > `escenario.md` value > PRD default hardcoded in the skill. This exists
+  specifically to let scenarios vary classroom/teacher capacity and stress-test the
+  pipeline (e.g. `max_aulas=2` to force unschedulable-group alerts).
+- **Visualizer integration**: only the orchestrator skill talks to `viz/` — subagents never
+  publish events directly (they don't know `viz_port` or the HTTP protocol). It never
+  starts the `viz/` server — the human must already have `matricula viz` running. It
+  health-checks `GET /health` and, if up, POSTs the same event vocabulary `runner.py`
+  emits (`run_started`, `pool_progress`, `pool_completed`, `validation_done`,
+  `demand_done`, `grouping_done`, `scheduling_done`, `assignment_done`, `alerts`,
+  `run_completed`, `cuatrimestre_summary`) plus four new event types specific to this mode
+  (`subagent_started`, `subagent_completed`, `phase_started`, `phase_completed` — see
+  "Multi-agent skill topology" below) to `POST /publish` via `curl`, tolerating a
+  down/missing server the same way `viz/sink.py::HttpSink` does (warn once, never block or
+  abort the run).
 - Determinism is explicitly **not** preserved in this mode (an LLM decides calculation and
   narration timing) — same trade-off the removed `--agents` mode had; don't try to make it
   byte-reproducible the way the default mode is.
+
+### Multi-agent skill topology
+
+Three skill files, each independently auditable, only one of which (`matricula`) is ever
+invoked directly by a human:
+
+- **`.claude/skills/matricula/SKILL.md`** — the orchestrator, and the only public entry
+  point (`PRD.md` fixes this name: *"un skill o comando llamado 'matricula'"*). Runs PRD
+  steps 0, 2, 3, 10, 11 inline (cheap global-state work: migrating graduates, checking
+  consecutiveness, generating carnets/names, consolidating alerts, persisting files) and
+  dispatches everything else to the two skills below via the `Task` tool.
+- **`.claude/skills/matricula-estudiante/SKILL.md`** — worker skill, one `Task` per
+  student, up to 5 in flight at a time (the orchestrator batches the full student list into
+  groups of ≤5 and waits for each batch to fully return before starting the next). Covers
+  PRD steps 1+4 (simulate previous-period grades, build this period's request list) for a
+  single student. Conceptually the skill-mode analogue of
+  `simulation/worker.py::process_student()` run under `ProcessPoolExecutor` in the default
+  mode — same contract that one student's failure never aborts the batch, expressed here as
+  a `"error": "..."` field in a delimited ` ```student-result ` JSON block instead of a
+  caught Python exception. Never reads/writes files or talks to the visualizer directly —
+  everything it needs arrives in its `Task` prompt, and its result is consumed and
+  persisted by the orchestrator.
+- **`.claude/skills/matricula-horario/SKILL.md`** — worker skill, dispatched exactly
+  **once** per run (no batching, no parallelism) via a single `Task`. Covers PRD steps 5-9
+  (validation, demand, grouping, scheduling, individual assignment) in one sequential pass.
+  This is deliberately **not** split into parallel subagents or one subagent per phase: each
+  phase needs the complete output of the previous one (demand needs every validation
+  result; grouping needs closed/open courses; scheduling needs the full group list;
+  assignment needs the finished schedule) and all of them mutate shared global state
+  (per-course seats, classroom occupancy, teacher availability, each student's accumulating
+  individual schedule) — the exact same reason `orchestration/*` is intentionally
+  single-process in the default mode (see "Key design decisions" above). Splitting these
+  phases into isolated subagents would only introduce state races with no real parallelism
+  gain, since they're reasoning/CPU-bound, not I/O-bound. Returns a delimited
+  ` ```horario-result ` JSON block; if it reports `error != null` or returns something
+  unparseable, the orchestrator treats it as a **systemic run failure** (same severity as a
+  non-consecutive period) — stop, persist nothing, report to the user — unlike a single
+  failed `matricula-estudiante` subagent, which only produces one alert and never aborts
+  the run.
+- **Result contract**: both worker skills end their response with exactly one delimited
+  code block (` ```student-result ` / ` ```horario-result `) containing JSON — this is how
+  the orchestrator collects structured results from several subagents without relying on
+  intermediate files.
+- **New visualizer events**, always published by the orchestrator only, never by a
+  subagent: `subagent_started`/`subagent_completed` (`{role, id, batch_index, batch_size}` /
+  `{role, id, status, batch_index}`, one pair per `matricula-estudiante` dispatch) and
+  `phase_started`/`phase_completed` (`{phase: "horario_y_asignacion"}`, bracketing the
+  single `matricula-horario` dispatch). `src/matricula/viz/server.py` and `sink.py` needed
+  **no changes** for this — the server is a type-agnostic relay; only
+  `viz/static/index.html` gained a "Subagentes en progreso" card section that reacts to
+  these four event types.
 
 ## Shared name pool (students + teachers)
 
