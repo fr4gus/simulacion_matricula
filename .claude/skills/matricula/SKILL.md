@@ -37,11 +37,35 @@ consolidación de alertas, persistencia de archivos). El cálculo de negocio por
 - `periodo` (requerido): `YYYY-PP`, `PP` en `{01, 02, 03}`.
 - `n_estudiantes` (opcional, default `10`): cantidad de estudiantes nuevos a crear en esta
   corrida.
+- `base_dir` (opcional, default `data/` en la raíz del repo): directorio donde viven y se
+  escriben `students/`, `periodos_lectivos/`, `profesores.md`, `escenario.md`,
+  `graduated/`. Ver sección 1.1.
 - Overrides de escenario opcionales, formato `clave=valor`: `max_aulas=`, `capacidad_aula=`,
   `cupo_grupo=`, `minimo_apertura=`, `probabilidad_aprobacion=`, `nota_minima=`.
 - `viz_port` (opcional, default `8765`): puerto del visualizador standalone.
 
-Ejemplo: `/matricula 2026-01 10` · `/matricula 2026-03 10 max_aulas=2`
+Ejemplo: `/matricula 2026-01 10` · `/matricula 2026-03 10 max_aulas=2` ·
+`/matricula 2026-01 10 base_dir=/otro/lugar`
+
+### 1.1 Directorio de datos (`base_dir`)
+
+Por defecto es `data/` en la raíz de este repo (**no** el cwd ni la raíz del repo
+directamente) — un directorio generado, deliberadamente separado del código fuente y
+listado en `.gitignore` para que ninguna corrida termine commiteada por accidente. Si
+`data/` no existe todavía, creála (junto con `data/students/`, `data/periodos_lectivos/`)
+en la primera corrida — es la corrida inicializadora, tratala igual que cualquier otra
+primera corrida (Paso 2).
+
+Si el usuario pasa `base_dir=<ruta>` explícitamente en la invocación, usá esa ruta en su
+lugar (absoluta o relativa a la raíz del repo) — típicamente para tener varios escenarios
+de prueba en paralelo (p.ej. `base_dir=data/escenario-aulas-reducidas`) sin que se pisen
+entre sí. `nombres.md` (el pool de nombres compartido) sigue siendo el único de la raíz del
+repo — no vive dentro de `base_dir`, es un dato de referencia fijo del proyecto, no un
+artefacto generado por corrida.
+
+Todas las rutas de `students/*.md`, `periodos_lectivos/*.md`, `profesores.md`,
+`escenario.md` y `graduated/*.md` mencionadas en el resto de este documento son relativas a
+`base_dir`, no a la raíz del repo.
 
 ## 2. Escenario: `escenario.md`
 
@@ -147,8 +171,9 @@ En este orden:
 
 ## 4. Algoritmo paso a paso
 
-Determiná primero `base_dir` = directorio de trabajo actual (cwd). Todas las rutas de abajo
-son relativas a `base_dir`.
+Resolvé primero `base_dir` como se describe en la sección 1.1 (`data/` por defecto, o el
+valor explícito de la invocación). Todas las rutas de abajo son relativas a `base_dir`,
+salvo `nombres.md` que siempre está en la raíz del repo.
 
 ### Paso 0 — Migrar graduados
 Para cada `students/DDDDDD.md`, calculá el "siguiente cuatrimestre pendiente" (mismo
@@ -169,8 +194,9 @@ Prefijo de carnet = últimos 2 dígitos del año de `periodo`. Buscá, entre tod
 ese prefijo; si no hay ninguno, empezá en `0001`. Creá `n_estudiantes` carnets consecutivos
 de 6 dígitos.
 
-Nombres: abrí `profesores.md` (raíz del repo), leé "Proximo indice libre del pool: N". Abrí
-`nombres.md` (1000 líneas "Nombre Apellido"). Para cada estudiante nuevo `i` (0-indexado),
+Nombres: abrí `profesores.md` (dentro de `base_dir`), leé "Proximo indice libre del pool:
+N". Abrí `nombres.md` (raíz del repo, 1000 líneas "Nombre Apellido"). Para cada estudiante
+nuevo `i` (0-indexado),
 el nombre es la línea en la posición `(N + i) mod 1000`. El cursor avanza a `N +
 n_estudiantes` — ese valor es el `teacher_start_index` que le vas a pasar a
 `matricula-horario` en el Paso 8 (mismo pool compartido, un solo cursor).

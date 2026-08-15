@@ -6,3 +6,15 @@ __pycache__/
 .ruff_cache/
 build/
 dist/
+
+# Datos generados por corridas de matricula (modo default y modo skills):
+# students/, periodos_lectivos/, profesores.md, escenario.md, graduated/ de
+# cualquier corrida. El modo default acepta --base-dir (ver CLAUDE.md); el
+# modo skills usa data/ por defecto (ver .claude/skills/matricula/SKILL.md,
+# seccion 1.1) salvo que se pase base_dir=<ruta> explicito en la invocacion.
+data/
+students/
+periodos_lectivos/
+graduated/
+profesores.md
+escenario.md

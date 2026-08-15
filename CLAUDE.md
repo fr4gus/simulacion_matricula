@@ -88,9 +88,19 @@ with zero Python business logic. It replaced an earlier `--agents` mode (`agent_
 Claude Agent SDK, tool-call wrappers around `orchestration/*`) that has been removed
 entirely from this branch.
 
-- **Invocation**: the skill takes `periodo` (required) and `n_estudiantes` (optional,
+- **Invocation**: the skill takes `periodo` (required), `n_estudiantes` (optional,
   default 10 — configurable per PRD.md's new "Nota de arquitectura" section, unlike the
-  original fixed-10 rule) plus optional scenario overrides.
+  original fixed-10 rule), `base_dir` (optional, see below), plus optional scenario
+  overrides.
+- **`base_dir`** defaults to `data/` at the repo root — a generated, gitignored directory,
+  deliberately separate from source (never the invoking cwd or the repo root directly).
+  `students/`, `periodos_lectivos/`, `profesores.md`, `escenario.md`, and `graduated/` all
+  live under it; `nombres.md` stays a fixed repo-root reference file, never per-`base_dir`.
+  Pass `base_dir=<path>` explicitly to point at another location (e.g. to keep several
+  scenario runs side by side without collisions). `.gitignore` also covers
+  `students/`/`periodos_lectivos/`/`profesores.md`/`escenario.md`/`graduated/` at the repo
+  root as a safety net, in case a run targets `base_dir=.` or the Python default mode is
+  invoked without `--base-dir`.
 - **`escenario.md`** (base_dir root, alongside `profesores.md`): an optional Markdown table
   of previously-fixed PRD constants (`max_aulas`, `capacidad_aula`, `cupo_grupo`,
   `minimo_apertura`, `probabilidad_aprobacion`, `nota_minima`,
