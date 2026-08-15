@@ -10,12 +10,18 @@ Implemented. `PRD.md` (in Spanish) is the authoritative domain specification, wi
 split-block day rules, 50+ profile accumulation, retake auto-requesting) — read that section
 alongside the rest of the PRD, since it overrides anything that reads ambiguous above it.
 
-The system is a **multi-agent enrollment (matricula) simulation harness**, explicitly without
-any LLM wrapper in its default mode — the "agents" are plain Python orchestration + a
-`ProcessPoolExecutor` pool of per-student worker processes, not LLM-backed agents. A separate,
-opt-in `--agents` mode (`agent_harness/`, see below) layers a real Claude Agent SDK orchestrator
-on top of the *same* deterministic business logic, without altering it — see that module's own
-section further down for the boundary between the two modes.
+The system is a **multi-agent enrollment (matricula) simulation harness** with two execution
+modes:
+
+1. **Default mode** — explicitly without any LLM wrapper: the "agents" are plain Python
+   orchestration + a `ProcessPoolExecutor` pool of per-student worker processes, not
+   LLM-backed agents. `python -m matricula run <period> [...]`.
+2. **Skills mode** — `.claude/skills/matricula/SKILL.md`, an opt-in path where a Claude
+   Code/Codex agent runs the entire 11-step pipeline itself, reading/writing the `.md`
+   files directly per rules transcribed in the skill, with **no Python business-logic code
+   involved at all** (not `orchestration/*`, not `io/*`, not `simulation/*`) — see "Skills-
+   driven orchestration mode" below. This replaced an earlier `--agents` mode that wrapped
+   the Python pipeline with the Claude Agent SDK; that mode has been removed.
 
 ### Module map (`src/matricula/`)
 
@@ -44,15 +50,10 @@ section further down for the boundary between the two modes.
   (per-student conflict-free group assignment), `alerts.py`, `runner.py` (`run_period()` —
   the top-level entry point wiring all 11 PRD steps together).
 - `reporting/summary.py` — human-facing run summary + exit-code decision.
-- `agent_harness/` — opt-in `--agents` mode: `gate.py` (`PhaseGate`, hard-enforces PRD phase
-  order regardless of what the LLM attempts), `state.py` (`PipelineState`, the in-memory mirror
-  of `runner.py`'s local variables, mutated by tool calls instead of by sequential code),
-  `tools.py` (one Agent SDK `@tool` per PRD phase, each a thin wrapper delegating to the same
-  `orchestration/*` function `runner.py` calls — no business logic is duplicated), `orchestrator.py`
-  (`run_period_with_agent()` — the `--agents` counterpart to `runner.run_period()`, same
-  signature, drives a real `ClaudeSDKClient` session). See "Agent-driven orchestration mode" below.
 - `cli.py` / `__main__.py` — `python -m matricula run <period> [--seed N] [--base-dir PATH]
-  [--workers N] [--agents] [--model NAME]`.
+  [--workers N] [--visualize] [--viz-port N] [--demo-delay S]`, plus `matricula viz [--port]
+  [--host]` for the standalone visualizer. No LLM-related flags — see "Skills-driven
+  orchestration mode" below for the separate, non-CLI path.
 
 ### Key design decisions worth knowing before touching this code
 
@@ -72,31 +73,39 @@ section further down for the boundary between the two modes.
 - **Persistence**: `students/*.md` and `periodos_lectivos/*.md` are the only source of truth;
   writers always re-render the full file from the in-memory dataclass rather than patching text.
 
-## Agent-driven orchestration mode (`--agents`, opt-in)
+## Skills-driven orchestration mode
 
-`agent_harness/` wraps the exact same deterministic pipeline with a real Claude Agent SDK
-orchestrator instead of `runner.run_period()`'s sequential Python calls. This is **not** a
-replacement for the default mode and does not change any PRD business rule:
+`.claude/skills/matricula/SKILL.md` is a second, independent way to run a period: instead
+of `orchestration/*` + `runner.run_period()`, a Claude Code/Codex agent reads the skill's
+instructions and runs the whole 11-step pipeline itself — reading and writing
+`students/*.md`, `periodos_lectivos/*.md`, and `profesores.md` directly with its own
+reasoning, per business rules transcribed in the skill from `PRD.md`. This is **not** a
+thin wrapper: the skill does not call into `orchestration/*`, `io/*`, or `simulation/*` at
+all, and must not — the whole point is exploring an orchestration model driven purely by
+skill instructions, portable across agent harnesses (Claude Code or Codex), with zero
+Python business logic. It replaced an earlier `--agents` mode (`agent_harness/`, Claude
+Agent SDK, tool-call wrappers around `orchestration/*`) that has been removed entirely from
+this branch.
 
-- Every phase's logic still lives in `orchestration/*` — `agent_harness/tools.py` only wraps each
-  function as an SDK `@tool` (`simulate_grades`, `validate_requests`, `compute_demand`,
-  `form_groups`, `schedule_groups`, `assign_students`, `persist_results`, plus a read-only
-  `raise_alerts`). The LLM decides *when* to call each tool; it never re-derives the business
-  outcome itself.
-- `agent_harness/gate.py::PhaseGate` enforces the fixed PRD phase order in Python, independent of
-  what the model attempts: a tool call out of sequence returns an error result instead of
-  executing, so the agent can retry/reflect but cannot desync the run from the 11-step pipeline.
-- If the agent's turn ends without invoking `persist_results` (hang, giving up, exhausted turn
-  budget), `orchestrator.py` force-persists whatever the `PipelineState` accumulated and appends
-  an `Alert` documenting the incomplete run — the run never hangs indefinitely or leaves
-  `students/`/`periodos_lectivos/` half-written without an explanation.
-- `claude-agent-sdk` is an **optional** dependency (`pyproject.toml`'s `agents` extra), never a
-  base one — the default mode's `dependencies = []` must stay true. `agent_harness/__init__.py`
-  resolves `run_period_with_agent` via `__getattr__` rather than a top-level import, and `cli.py`
-  only imports the package inside the `--agents` branch of `_run()`, so neither the module import
-  nor the CLI's default path ever requires the SDK to be installed.
-- Determinism is explicitly **not** preserved in this mode (an LLM decides call timing/order of
-  narration) — this is the intentional trade-off of `--agents`; don't try to make it
+- **Invocation**: the skill takes `periodo` (required) and `n_estudiantes` (optional,
+  default 10 — configurable per PRD.md's new "Nota de arquitectura" section, unlike the
+  original fixed-10 rule) plus optional scenario overrides.
+- **`escenario.md`** (base_dir root, alongside `profesores.md`): an optional Markdown table
+  of previously-fixed PRD constants (`max_aulas`, `capacidad_aula`, `cupo_grupo`,
+  `minimo_apertura`, `probabilidad_aprobacion`, `nota_minima`,
+  `estudiantes_nuevos_por_periodo`) that the skill reads at the start of a run. Precedence:
+  explicit invocation override > `escenario.md` value > PRD default hardcoded in the skill.
+  This exists specifically to let scenarios vary classroom/teacher capacity and stress-test
+  the pipeline (e.g. `max_aulas=2` to force unschedulable-group alerts).
+- **Visualizer integration**: the skill never starts the `viz/` server — the human must
+  already have `matricula viz` running. It health-checks `GET /health` and, if up, POSTs
+  the same event vocabulary `runner.py` emits (`run_started`, `pool_progress`,
+  `pool_completed`, `validation_done`, `demand_done`, `grouping_done`, `scheduling_done`,
+  `assignment_done`, `alerts`, `run_completed`, `cuatrimestre_summary`) to `POST /publish`
+  via `curl`, tolerating a down/missing server the same way `viz/sink.py::HttpSink` does
+  (warn once, never block or abort the run).
+- Determinism is explicitly **not** preserved in this mode (an LLM decides calculation and
+  narration timing) — same trade-off the removed `--agents` mode had; don't try to make it
   byte-reproducible the way the default mode is.
 
 ## Shared name pool (students + teachers)
@@ -115,13 +124,15 @@ Both new students and new teachers draw from this **single shared pool**, never 
   "Proximo indice libre del pool" line is the only source of truth for how many pool entries have
   been handed out across the whole simulation's history; `students/*.md` stores names as plain
   text with no pool index, so the cursor cannot be re-derived from disk any other way.
-- Both `orchestration/runner.py::run_period()` and `agent_harness/orchestrator.py` read this
-  cursor first, allocate names for this period's new students, then pass the advanced cursor into
-  `orchestration/scheduling.py::schedule_groups(groups, teacher_start_index=...)` — which now
-  returns `(schedules, alerts, teacher_records, next_free_index)` instead of the old 2-tuple —
-  and finally persist the merged `TeacherRegistry` (old + new records) back to `profesores.md`.
-  Both entry points must stay in lockstep on this protocol; a mismatch would silently start
-  reusing pool indices across runs.
+- `orchestration/runner.py::run_period()` reads this cursor first, allocates names for this
+  period's new students, then passes the advanced cursor into
+  `orchestration/scheduling.py::schedule_groups(groups, teacher_start_index=...)` — which
+  returns `(schedules, alerts, teacher_records, next_free_index)` — and finally persists the
+  merged `TeacherRegistry` (old + new records) back to `profesores.md`. The skill mode
+  (`.claude/skills/matricula/SKILL.md`) follows the same protocol in prose — same shared
+  cursor, same wraparound rule — since it reads/writes `profesores.md` directly instead of
+  calling this code. Both paths must stay in lockstep on the protocol; a mismatch would
+  silently start reusing pool indices across runs.
 - The source data itself is not guaranteed unique (2 duplicate full-name pairs out of 1000, since
   the generator combines first/last names randomly) — "no repeats" here means no *pool index* is
   ever reused within the simulation's history, not that every rendered full name is distinct.
@@ -132,11 +143,11 @@ Students who have passed every course in the study plan (`next_pending_cuatrimes
 `simulation/requests.py` returns `None`) stop being part of the active simulation:
 
 - `io/history.py::migrate_graduated_students(base_dir)` moves their `students/DDDDDD.md` file
-  (unmodified, just relocated) to `graduated/DDDDDD.md`. Both `orchestration/runner.py::run_period()`
-  and `agent_harness/orchestrator.py::run_period_with_agent()` call it first thing, before
-  `load_all_students()` — so a student who graduates *during* a run is still processed normally
-  for that run (grades simulated, matricula written), and only stops being loaded starting the
-  *next* run.
+  (unmodified, just relocated) to `graduated/DDDDDD.md`. `orchestration/runner.py::run_period()`
+  calls it first thing, before `load_all_students()` — so a student who graduates *during* a
+  run is still processed normally for that run (grades simulated, matricula written), and only
+  stops being loaded starting the *next* run. The skill mode follows the same rule (Step 0 of
+  its algorithm), just performed by the agent's own file operations instead of this function.
 - `graduated/` is purely historical and out-of-pipeline: `load_all_students()` never reads it, so
   graduated students never occupy a `ProcessPoolExecutor` worker, are never asked to submit
   requests (moot anyway — `build_request_course_codes()` already returns `[]` once

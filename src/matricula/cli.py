@@ -62,22 +62,6 @@ def build_parser() -> argparse.ArgumentParser:
         "para demos (default: 0, sin retraso; solo tiene efecto junto a "
         "--visualize)",
     )
-    run_parser.add_argument(
-        "--agents",
-        action="store_true",
-        help="Corre el pipeline con un agente orquestador real del Claude "
-        "Agent SDK en vez del orquestador Python secuencial (requiere el "
-        "extra 'agents' instalado y ANTHROPIC_API_KEY en el entorno). La "
-        "logica de negocio de cada fase no cambia; solo cambia quien decide "
-        "cuando invocarla.",
-    )
-    run_parser.add_argument(
-        "--model",
-        default=None,
-        help="Modelo Claude a usar con --agents (default: env var "
-        "MATRICULA_AGENT_MODEL o claude-sonnet-5). Sin efecto sin --agents.",
-    )
-
     viz_parser = subparsers.add_parser(
         "viz", help="Levanta el servidor de visualizacion de forma independiente"
     )
@@ -140,24 +124,9 @@ def _run(args: argparse.Namespace) -> int:
         on_event = sink.emit
 
     try:
-        if args.agents:
-            # Import perezoso: `agent_harness` depende de `claude-agent-sdk`
-            # (extra opcional "agents"), asi que el modo default de la CLI no
-            # debe pagar ese import ni requerir la dependencia instalada.
-            from matricula.agent_harness import run_period_with_agent
-
-            result = run_period_with_agent(
-                base_dir,
-                period,
-                seed=args.seed,
-                max_workers=args.workers,
-                on_event=on_event,
-                model=args.model,
-            )
-        else:
-            result = run_period(
-                base_dir, period, seed=args.seed, max_workers=args.workers, on_event=on_event
-            )
+        result = run_period(
+            base_dir, period, seed=args.seed, max_workers=args.workers, on_event=on_event
+        )
     finally:
         if server is not None:
             server.stop()

@@ -20,7 +20,7 @@ que grupo quedo asignado ese profesor en la corrida donde se lo genero
 
 "Proximo indice libre del pool" es el cursor global y determinista compartido
 con los estudiantes: cada estudiante nuevo Y cada profesor nuevo, en TODA
-corrida (`run_period` o `run_period_with_agent`), consume el siguiente indice
+corrida (`run_period` o el skill `matricula`), consume el siguiente indice
 en orden 0, 1, 2, ... y lo avanza -- es la unica fuente de verdad sobre
 "cuantos nombres del pool ya se repartieron", en vez de intentar derivarlo de
 `students/*.md` (que guarda el nombre como texto, sin el indice de origen).

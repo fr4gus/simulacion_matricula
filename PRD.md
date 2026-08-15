@@ -141,3 +141,19 @@ Cada solicitud que no pueda ser atendida debe generar una alerta con el carne de
 4. **Bloques de horario divididos**: cuando una materia se imparte en dos bloques de 100 minutos, los bloques deben caer en dias distintos de la semana; no hay restriccion adicional de no-consecutividad (Lunes/Martes es valido).
 5. **Fallo al generar horario de un grupo**: si un grupo cumplio el minimo de solicitudes validas pero no se encuentra combinacion de aula, horario y profesor libre de conflictos, el grupo queda sin horario asignado, se genera una alerta para revision humana, y la ejecucion del periodo continua con el resto de grupos (no se aborta la simulacion completa).
 6. **Acumulacion de perfiles (50+ estudiantes)**: no es una meta que el sistema deba forzar en una sola ejecucion. Es el resultado natural de ejecutar el proceso de matricula periodo por periodo, de forma consecutiva (10 estudiantes nuevos por periodo). El sistema valida que cada ejecucion corresponda al periodo consecutivo esperado segun el historial almacenado.
+
+## Nota de arquitectura (modo de ejecucion "skills")
+
+El objetivo #2 original ("no vamos a usar ningun wrapper LLM") tiene, a partir de este
+cambio, una excepcion explicita: junto al modo Python puro descrito arriba, existe un modo
+de ejecucion basado en un skill de Claude Code/Codex (`.claude/skills/matricula/SKILL.md`)
+donde un agente LLM lee y escribe directamente los archivos `.md` de este documento,
+calculando el proceso de matricula completo con su propio razonamiento en vez de invocar el
+pipeline Python. El motivo es explorar una arquitectura orquestada por skills, agnostica de
+la herramienta de agente concreta. Dos reglas de este documento dejan de ser fijas y pasan a
+ser parametrizables por invocacion (ver `escenario.md` en la raiz de los datos): la cantidad
+de estudiantes nuevos por periodo (seccion "Expedientes de Estudiantes", antes fija en 10) y
+las restricciones de aulas/profesores (seccion "Supuestos", antes fijas en 100 aulas /
+capacidad 20 / cupo 10 / apertura minima 5). El resto de reglas de negocio de este
+documento, incluidas las Aclaraciones, se mantienen sin cambios y aplican por igual a ambos
+modos de ejecucion.

@@ -154,7 +154,7 @@
   </div>
 
   <div id="agent-section">
-    <h2 style="margin-top: 2rem;">Agente <span class="status">(modo --agents)</span></h2>
+    <h2 style="margin-top: 2rem;">Agente <span class="status">(mensajes narrados)</span></h2>
     <div id="agent-log"></div>
   </div>
 
@@ -191,7 +191,7 @@
 
     function appendAgentRunMarker(period) {
       // No revela la seccion todavia -- solo se muestra si esta corrida
-      // termina emitiendo al menos un "agent_message" real (modo --agents).
+      // termina emitiendo al menos un "agent_message" real.
       if (!agentLog.children.length) return;
       const marker = document.createElement("div");
       marker.className = "agent-entry agent-run-marker";
@@ -201,9 +201,10 @@
     }
 
     function appendAgentMessage(text) {
-      // Solo se muestra esta seccion si la corrida usa --agents; el modo
-      // default nunca emite eventos "agent_message". Se acumula entre
-      // corridas (ver resetUI) para conservar el historial completo.
+      // Solo se muestra esta seccion si la corrida emite eventos
+      // "agent_message" (narracion opcional de un productor externo); el
+      // modo default en Python nunca los emite. Se acumula entre corridas
+      // (ver resetUI) para conservar el historial completo.
       agentSection.style.display = "block";
       const entry = document.createElement("div");
       entry.className = "agent-entry";
