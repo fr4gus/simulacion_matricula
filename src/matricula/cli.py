@@ -35,6 +35,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Numero de procesos del pool (default: os.cpu_count())",
     )
+    run_parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Levanta un servidor local con vista en tiempo real del progreso",
+    )
+    run_parser.add_argument(
+        "--viz-port",
+        type=int,
+        default=8765,
+        help="Puerto del servidor de visualizacion (default: 8765)",
+    )
 
     return parser
 
@@ -67,7 +78,30 @@ def _run(args: argparse.Namespace) -> int:
         )
         return EXIT_ABORTED
 
-    result = run_period(base_dir, period, seed=args.seed, max_workers=args.workers)
+    server = None
+    on_event = None
+    if args.visualize:
+        from matricula.viz.server import start as start_viz_server
+
+        try:
+            server = start_viz_server(port=args.viz_port)
+        except OSError as exc:
+            print(
+                f"Error: no se pudo iniciar el visualizador en el puerto {args.viz_port}: {exc}",
+                file=sys.stderr,
+            )
+            return EXIT_ABORTED
+        print(f"Visualizador: http://127.0.0.1:{server.port}", file=sys.stderr)
+        on_event = server.emit
+
+    try:
+        result = run_period(
+            base_dir, period, seed=args.seed, max_workers=args.workers, on_event=on_event
+        )
+    finally:
+        if server is not None:
+            server.stop()
+
     print_summary(result.summary)
     return result.summary.exit_code
 

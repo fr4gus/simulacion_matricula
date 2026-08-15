@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>Matricula - progreso en vivo</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2e38;
+    --text: #e6e8ec;
+    --muted: #8b93a3;
+    --accent: #4f8cff;
+    --ok: #3ecf8e;
+    --warn: #f2b84b;
+    --err: #ef5b5b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
+  .status { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.5rem; }
+  .status.connected { color: var(--ok); }
+  .status.disconnected { color: var(--err); }
+
+  .phases {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 2rem;
+  }
+  .phase {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+  }
+  .phase-name { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .phase-value { font-size: 1.15rem; margin-top: 0.35rem; font-variant-numeric: tabular-nums; }
+  .phase.pending .phase-value { color: var(--muted); }
+  .phase.done .phase-value { color: var(--ok); }
+
+  .bar {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    margin-top: 0.6rem;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    transition: width 0.2s ease;
+  }
+  .phase.done .bar-fill { background: var(--ok); }
+
+  h2 { font-size: 1rem; margin: 0 0 0.75rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  .empty-alerts { color: var(--muted); padding: 0.75rem 0; }
+  .status-badge {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    background: rgba(242, 184, 75, 0.15);
+    color: var(--warn);
+  }
+</style>
+</head>
+<body>
+  <h1>Matricula &mdash; progreso en vivo</h1>
+  <div id="status" class="status">Conectando&hellip;</div>
+
+  <div class="phases">
+    <div class="phase pending" id="phase-pool">
+      <div class="phase-name">Pool de estudiantes</div>
+      <div class="phase-value" data-field="value">esperando&hellip;</div>
+      <div class="bar"><div class="bar-fill" data-field="bar"></div></div>
+    </div>
+    <div class="phase pending" id="phase-validation">
+      <div class="phase-name">Validacion</div>
+      <div class="phase-value" data-field="value">esperando&hellip;</div>
+    </div>
+    <div class="phase pending" id="phase-demand">
+      <div class="phase-name">Demanda / materias</div>
+      <div class="phase-value" data-field="value">esperando&hellip;</div>
+    </div>
+    <div class="phase pending" id="phase-grouping">
+      <div class="phase-name">Grupos</div>
+      <div class="phase-value" data-field="value">esperando&hellip;</div>
+    </div>
+    <div class="phase pending" id="phase-scheduling">
+      <div class="phase-name">Horario</div>
+      <div class="phase-value" data-field="value">esperando&hellip;</div>
+    </div>
+    <div class="phase pending" id="phase-assignment">
+      <div class="phase-name">Asignacion individual</div>
+      <div class="phase-value" data-field="value">esperando&hellip;</div>
+    </div>
+  </div>
+
+  <h2>Alertas <span id="alert-count" class="status">(0)</span></h2>
+  <table id="alerts-table">
+    <thead>
+      <tr><th>Carne</th><th>Materia</th><th>Motivo</th><th>Estado</th></tr>
+    </thead>
+    <tbody id="alerts-body">
+      <tr><td colspan="4" class="empty-alerts">Sin alertas todavia.</td></tr>
+    </tbody>
+  </table>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const alertsBody = document.getElementById("alerts-body");
+    const alertCountEl = document.getElementById("alert-count");
+    let alertCount = 0;
+    let alertsCleared = false;
+
+    function setPhase(id, text, done, barPercent) {
+      const el = document.getElementById(id);
+      el.classList.toggle("done", !!done);
+      el.classList.toggle("pending", !done);
+      el.querySelector('[data-field="value"]').textContent = text;
+      if (barPercent !== undefined) {
+        const bar = el.querySelector('[data-field="bar"]');
+        if (bar) bar.style.width = barPercent + "%";
+      }
+    }
+
+    function appendAlerts(alerts) {
+      if (!alerts.length) return;
+      if (!alertsCleared) {
+        alertsBody.innerHTML = "";
+        alertsCleared = true;
+      }
+      for (const a of alerts) {
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+          "<td>" + (a.carnet || "-") + "</td>" +
+          "<td>" + (a.course_code || "-") + "</td>" +
+          "<td>" + a.reason + "</td>" +
+          "<td><span class=\"status-badge\">" + a.status + "</span></td>";
+        alertsBody.appendChild(tr);
+        alertCount++;
+      }
+      alertCountEl.textContent = "(" + alertCount + ")";
+    }
+
+    function handleEvent(evt) {
+      switch (evt.type) {
+        case "run_started":
+          setPhase("phase-pool", "0/" + evt.total_students, false, 0);
+          break;
+        case "pool_progress": {
+          const pct = evt.total ? Math.round((evt.completed / evt.total) * 100) : 0;
+          setPhase("phase-pool", evt.completed + "/" + evt.total, evt.completed >= evt.total, pct);
+          break;
+        }
+        case "pool_completed":
+          setPhase("phase-pool", evt.completed + "/" + evt.total +
+            (evt.errors ? " (" + evt.errors + " errores)" : ""), true, 100);
+          break;
+        case "validation_done":
+          setPhase("phase-validation", evt.valid + " validas / " + evt.rejected + " rechazadas", true);
+          break;
+        case "demand_done":
+          setPhase("phase-demand", evt.opened + " abiertas / " + evt.closed + " cerradas", true);
+          break;
+        case "grouping_done":
+          setPhase("phase-grouping", evt.groups_formed + " grupos formados", true);
+          break;
+        case "scheduling_done":
+          setPhase("phase-scheduling", evt.scheduled + " asignados / " + evt.unschedulable + " sin horario", true);
+          break;
+        case "assignment_done":
+          setPhase("phase-assignment", evt.assigned_ok + " sin conflicto / " + evt.conflicts + " en conflicto", true);
+          break;
+        case "alerts":
+          appendAlerts(evt.alerts);
+          break;
+        case "run_completed":
+          statusEl.textContent = "Corrida completada (exit " + evt.summary.exit_code + ")";
+          statusEl.className = "status " + (evt.summary.exit_code === 0 ? "connected" : "disconnected");
+          break;
+      }
+    }
+
+    function connect() {
+      const es = new EventSource("/events");
+      es.onopen = () => {
+        statusEl.textContent = "Conectado, esperando eventos…";
+        statusEl.className = "status connected";
+      };
+      es.onerror = () => {
+        statusEl.textContent = "Desconectado, reintentando…";
+        statusEl.className = "status disconnected";
+      };
+      es.onmessage = (e) => {
+        try {
+          handleEvent(JSON.parse(e.data));
+        } catch (err) {
+          console.error("Evento invalido", err, e.data);
+        }
+      };
+    }
+
+    connect();
+  </script>
+</body>
+</html>

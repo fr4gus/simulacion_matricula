@@ -6,6 +6,7 @@ Ver PRD.md, "Proceso de Matricula", y CLAUDE.md para el mapeo detallado.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,12 +47,43 @@ def _default_worker_count() -> int:
     return os.cpu_count() or 1
 
 
+def _emit_new_alerts(emit: Callable[[dict], None], new_alerts: list[Alert]) -> None:
+    """Emite el evento `alerts` con solo las alertas nuevas de una fase (no acumuladas)."""
+    if not new_alerts:
+        return
+    emit(
+        {
+            "type": "alerts",
+            "alerts": [
+                {
+                    "carnet": a.carnet,
+                    "course_code": a.course_code,
+                    "reason": a.reason,
+                    "status": a.status,
+                }
+                for a in new_alerts
+            ],
+        }
+    )
+
+
 def run_period(
     base_dir: Path,
     period: Period,
     seed: int = 0,
     max_workers: int | None = None,
+    on_event: Callable[[dict], None] | None = None,
 ) -> RunResult:
+    """Corre el pipeline de 11 pasos del PRD para `period`.
+
+    `on_event`, si se pasa, recibe un dict por cada punto de progreso del
+    pipeline (ver src/matricula/viz/ para el consumidor de estos eventos).
+    Es puramente observacional: no afecta el resultado ni el orden de
+    ejecucion, y por defecto es un no-op, asi que los llamadores existentes
+    (tests, CLI sin --visualize) no cambian de comportamiento.
+    """
+    emit: Callable[[dict], None] = on_event or (lambda event: None)
+
     prev_period = latest_period(base_dir)
 
     students = load_all_students(base_dir)
@@ -68,6 +100,8 @@ def run_period(
 
     # --- Pasos 1-4: despachar al pool (notas del periodo anterior + solicitud nueva) ---
     all_students = list(students_by_carnet.values())
+    emit({"type": "run_started", "period": str(period), "total_students": len(all_students)})
+
     worker_results: dict[str, WorkerResult] = {}
     workers = max_workers if max_workers is not None else _default_worker_count()
 
@@ -76,6 +110,7 @@ def run_period(
             pool.submit(process_student, student, period, prev_period, seed): student.carnet
             for student in all_students
         }
+        completed = 0
         for future in as_completed(futures):
             carnet = futures[future]
             try:
@@ -83,6 +118,18 @@ def run_period(
             except Exception as exc:  # noqa: BLE001 - se convierte en alerta, no tumba la corrida
                 result = WorkerResult(carnet=carnet, error=str(exc))
             worker_results[carnet] = result
+            completed += 1
+            emit({"type": "pool_progress", "completed": completed, "total": len(all_students)})
+
+    pool_errors = sum(1 for r in worker_results.values() if r.error)
+    emit(
+        {
+            "type": "pool_completed",
+            "completed": len(worker_results),
+            "total": len(all_students),
+            "errors": pool_errors,
+        }
+    )
 
     alerts: list[Alert] = []
     all_requests_by_student: dict[str, list[str]] = {}
@@ -107,16 +154,26 @@ def run_period(
     valid_requests_by_course: dict[str, list[str]] = {}
     requests_valid_count = 0
     requests_rejected_count = 0
+    validation_alerts: list[Alert] = []
     for carnet, codes in sorted(all_requests_by_student.items()):
         student = students_by_carnet[carnet]
         results = validate_requests(student, codes)
-        alerts.extend(alerts_from_rejected_requests(results))
+        validation_alerts.extend(alerts_from_rejected_requests(results))
         for r in results:
             if r.status.value == "valida":
                 valid_requests_by_course.setdefault(r.course_code, []).append(carnet)
                 requests_valid_count += 1
             else:
                 requests_rejected_count += 1
+    alerts.extend(validation_alerts)
+    emit(
+        {
+            "type": "validation_done",
+            "valid": requests_valid_count,
+            "rejected": requests_rejected_count,
+        }
+    )
+    _emit_new_alerts(emit, validation_alerts)
 
     # --- Paso 6: demanda y apertura/cierre ---
     flat_valid_requests = [
@@ -125,7 +182,16 @@ def run_period(
         for carnet in carnets
     ]
     demand = compute_demand(flat_valid_requests)
-    alerts.extend(alerts_from_closed_courses(demand.closed_courses))
+    closed_alerts = alerts_from_closed_courses(demand.closed_courses)
+    alerts.extend(closed_alerts)
+    emit(
+        {
+            "type": "demand_done",
+            "opened": len(demand.open_courses),
+            "closed": len(demand.closed_courses),
+        }
+    )
+    _emit_new_alerts(emit, closed_alerts)
 
     # --- Paso 7: formacion de grupos (admision por prioridad, reparto balanceado) ---
     carnets_by_group: dict[tuple[str, str], list[str]] = {}
@@ -137,15 +203,33 @@ def run_period(
         all_groups.extend(groups)
         for group in groups:
             carnets_by_group[(course_code, group.number)] = group.carnets
+    emit({"type": "grouping_done", "groups_formed": len(all_groups)})
 
     # --- Paso 8: horario ---
     schedules, schedule_alerts = schedule_groups(all_groups)
     alerts.extend(schedule_alerts)
+    emit(
+        {
+            "type": "scheduling_done",
+            "scheduled": len(schedules),
+            "unschedulable": len(schedule_alerts),
+        }
+    )
+    _emit_new_alerts(emit, schedule_alerts)
 
     # --- Paso 9: asignacion individual ---
     course_names = {code: c.name for code, c in COURSES_BY_CODE.items()}
     assignment = assign_students(period, schedules, carnets_by_group, course_names)
     alerts.extend(assignment.alerts)
+    assigned_ok = sum(len(entries) for entries in assignment.matricula_by_carnet.values())
+    emit(
+        {
+            "type": "assignment_done",
+            "assigned_ok": assigned_ok,
+            "conflicts": len(assignment.alerts),
+        }
+    )
+    _emit_new_alerts(emit, assignment.alerts)
 
     for carnet, entries in assignment.matricula_by_carnet.items():
         students_by_carnet[carnet].matricula.extend(entries)
@@ -204,6 +288,23 @@ def run_period(
         courses_closed=len(demand.closed_courses),
         groups_formed=len(all_groups),
         alerts=alerts,
+    )
+
+    emit(
+        {
+            "type": "run_completed",
+            "summary": {
+                "period": summary.period,
+                "students_created": summary.students_created,
+                "requests_valid": summary.requests_valid,
+                "requests_rejected": summary.requests_rejected,
+                "courses_opened": summary.courses_opened,
+                "courses_closed": summary.courses_closed,
+                "groups_formed": summary.groups_formed,
+                "total_alerts": len(summary.alerts),
+                "exit_code": summary.exit_code,
+            },
+        }
     )
 
     return RunResult(summary=summary, period_record=period_record, students=all_students)
