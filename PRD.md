@@ -132,3 +132,12 @@ Debe existir una lista independiente para cada combinación de materia y grupo. 
 ### Alertas para revision humana
 
 Cada solicitud que no pueda ser atendida debe generar una alerta con el carne del estudiante, el codigo de la materia, el motivo del rechazo y el estado de la solicitud.
+
+## Aclaraciones (resuelven ambiguedades del planteamiento original)
+
+1. **Carga academica por periodo**: un estudiante continuante solicita unicamente las materias de su siguiente cuatrimestre pendiente (nunca se adelanta mas de un cuatrimestre), mas la repeticion de cualquier materia reprobada. No solicita simultaneamente materias de cuatrimestres mas adelantados aunque ya cumpla los requisitos.
+2. **Materias reprobadas**: se agregan automaticamente a la solicitud del siguiente periodo lectivo, junto con las materias nuevas del cuatrimestre que le corresponde. No hay limite de repeticiones y no bloquean el avance de cuatrimestre en las demas materias (mientras no sean su prerrequisito).
+3. **Reparto de estudiantes admitidos entre grupos de una misma materia**: el promedio historico y el carne solo determinan que solicitudes obtienen cupo cuando la demanda excede el cupo total de la materia. Una vez admitidos, la asignacion a un grupo especifico (01, 02, ...) es libre, sujeta unicamente a mantener el balance de tamano entre grupos (diferencia maxima de un estudiante).
+4. **Bloques de horario divididos**: cuando una materia se imparte en dos bloques de 100 minutos, los bloques deben caer en dias distintos de la semana; no hay restriccion adicional de no-consecutividad (Lunes/Martes es valido).
+5. **Fallo al generar horario de un grupo**: si un grupo cumplio el minimo de solicitudes validas pero no se encuentra combinacion de aula, horario y profesor libre de conflictos, el grupo queda sin horario asignado, se genera una alerta para revision humana, y la ejecucion del periodo continua con el resto de grupos (no se aborta la simulacion completa).
+6. **Acumulacion de perfiles (50+ estudiantes)**: no es una meta que el sistema deba forzar en una sola ejecucion. Es el resultado natural de ejecutar el proceso de matricula periodo por periodo, de forma consecutiva (10 estudiantes nuevos por periodo). El sistema valida que cada ejecucion corresponda al periodo consecutivo esperado segun el historial almacenado.

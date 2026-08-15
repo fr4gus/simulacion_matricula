@@ -12,18 +12,20 @@ such as in `data/` and `fixtures/`.
 
 ## Build, Test, and Development Commands
 
-No build system or dependency manifest is committed yet. Once Python code is
-added, provide a reproducible environment (preferably `pyproject.toml`) and
-document commands such as:
-
 ```bash
 python -m venv .venv
-python -m pytest
-python -m <package_or_module>
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m pytest              # full suite
+.venv/bin/python -m pytest tests/test_scheduling.py -q   # single file
+.venv/bin/ruff check src tests
+.venv/bin/ruff format src tests
+.venv/bin/python -m matricula run 2026-01 --base-dir /tmp/sim --seed 0
 ```
 
-Do not commit `.venv`, caches, or generated schedules. Add project-specific
-commands here when the tooling is established.
+`--seed` defaults to `0` and fully determines grade simulation (the only
+randomized step); `--workers` overrides the `ProcessPoolExecutor` size
+(defaults to `os.cpu_count()`). Runs are byte-identical across worker counts
+for the same seed. Do not commit `.venv`, caches, or generated schedules.
 
 ## Coding Style & Naming Conventions
 
