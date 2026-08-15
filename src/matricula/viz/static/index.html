@@ -119,12 +119,49 @@
     </tbody>
   </table>
 
+  <h2 style="margin-top: 2rem;">Censo de cuatrimestres</h2>
+  <div class="phases" id="cuatrimestre-body">
+    <div class="phase pending">
+      <div class="phase-name">Estado</div>
+      <div class="phase-value">esperando&hellip;</div>
+    </div>
+  </div>
+
   <script>
     const statusEl = document.getElementById("status");
     const alertsBody = document.getElementById("alerts-body");
     const alertCountEl = document.getElementById("alert-count");
+    const cuatrimestreBody = document.getElementById("cuatrimestre-body");
     let alertCount = 0;
     let alertsCleared = false;
+
+    const PHASE_IDS = [
+      "phase-pool", "phase-validation", "phase-demand",
+      "phase-grouping", "phase-scheduling", "phase-assignment",
+    ];
+
+    function resetUI() {
+      for (const id of PHASE_IDS) {
+        setPhase(id, "esperando…", false, 0);
+      }
+      alertsBody.innerHTML = '<tr><td colspan="4" class="empty-alerts">Sin alertas todavia.</td></tr>';
+      alertCount = 0;
+      alertsCleared = false;
+      alertCountEl.textContent = "(0)";
+      cuatrimestreBody.innerHTML =
+        '<div class="phase pending"><div class="phase-name">Estado</div>' +
+        '<div class="phase-value">esperando&hellip;</div></div>';
+    }
+
+    function makePhaseCard(name, value, done) {
+      const div = document.createElement("div");
+      div.className = "phase " + (done ? "done" : "pending");
+      div.innerHTML =
+        '<div class="phase-name"></div><div class="phase-value"></div>';
+      div.querySelector(".phase-name").textContent = name;
+      div.querySelector(".phase-value").textContent = value;
+      return div;
+    }
 
     function setPhase(id, text, done, barPercent) {
       const el = document.getElementById(id);
@@ -159,6 +196,9 @@
     function handleEvent(evt) {
       switch (evt.type) {
         case "run_started":
+          resetUI();
+          statusEl.textContent = "Corrida en curso (" + evt.period + ")…";
+          statusEl.className = "status connected";
           setPhase("phase-pool", "0/" + evt.total_students, false, 0);
           break;
         case "pool_progress": {
@@ -192,6 +232,24 @@
           statusEl.textContent = "Corrida completada (exit " + evt.summary.exit_code + ")";
           statusEl.className = "status " + (evt.summary.exit_code === 0 ? "connected" : "disconnected");
           break;
+        case "cuatrimestre_summary": {
+          cuatrimestreBody.innerHTML = "";
+          const entries = Object.entries(evt.cuatrimestre_counts).sort((a, b) => {
+            const na = parseInt(a[0].replace("cuatrimestre_", ""), 10);
+            const nb = parseInt(b[0].replace("cuatrimestre_", ""), 10);
+            return na - nb;
+          });
+          for (const [key, count] of entries) {
+            const n = key.replace("cuatrimestre_", "");
+            cuatrimestreBody.appendChild(
+              makePhaseCard("Cuatrimestre " + n, count + " estudiantes", false)
+            );
+          }
+          cuatrimestreBody.appendChild(
+            makePhaseCard("Graduados", evt.graduados + " estudiantes", true)
+          );
+          break;
+        }
       }
     }
 

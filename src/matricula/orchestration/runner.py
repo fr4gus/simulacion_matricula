@@ -14,7 +14,7 @@ from pathlib import Path
 from matricula.config import NEW_STUDENTS_PER_PERIOD
 from matricula.domain.models import Alert, Request, RequestStatus, Student
 from matricula.domain.periods import Period
-from matricula.domain.study_plan import COURSES_BY_CODE
+from matricula.domain.study_plan import COURSES_BY_CODE, MAX_CUATRIMESTRE
 from matricula.io.history import latest_period, load_all_students
 from matricula.io.period_md import HorarioRow, PeriodRecord, RosterEntry, write_period
 from matricula.io.student_md import write_student
@@ -25,6 +25,7 @@ from matricula.orchestration.grouping import form_groups, rank_by_priority
 from matricula.orchestration.scheduling import format_horario, schedule_groups
 from matricula.orchestration.validation import validate_requests
 from matricula.reporting.summary import RunSummary
+from matricula.simulation.requests import next_pending_cuatrimestre
 from matricula.simulation.worker import WorkerResult, process_student
 
 
@@ -45,6 +46,36 @@ def _new_carnets(base_dir: Path, period: Period, count: int) -> list[str]:
 
 def _default_worker_count() -> int:
     return os.cpu_count() or 1
+
+
+def _emit_cuatrimestre_summary(emit: Callable[[dict], None], base_dir: Path) -> None:
+    """Emite un censo global (todos los estudiantes en disco) por cuatrimestre pendiente.
+
+    Se llama despues de escribir los archivos de este periodo, para que el
+    censo refleje el estado recien actualizado. A diferencia del resto de
+    eventos, no describe esta corrida sino el estado acumulado de toda la
+    carrera hasta ahora.
+    """
+    census_students = load_all_students(base_dir)
+    cuatrimestre_counts = {n: 0 for n in range(1, MAX_CUATRIMESTRE + 1)}
+    graduados = 0
+    for student in census_students:
+        cuatrimestre = next_pending_cuatrimestre(student)
+        if cuatrimestre is None:
+            graduados += 1
+        else:
+            cuatrimestre_counts[cuatrimestre] += 1
+
+    emit(
+        {
+            "type": "cuatrimestre_summary",
+            "cuatrimestre_counts": {
+                f"cuatrimestre_{n}": count for n, count in cuatrimestre_counts.items()
+            },
+            "graduados": graduados,
+            "total_students": len(census_students),
+        }
+    )
 
 
 def _emit_new_alerts(emit: Callable[[dict], None], new_alerts: list[Alert]) -> None:
@@ -306,5 +337,7 @@ def run_period(
             },
         }
     )
+
+    _emit_cuatrimestre_summary(emit, base_dir)
 
     return RunResult(summary=summary, period_record=period_record, students=all_students)
