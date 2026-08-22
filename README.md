@@ -41,15 +41,8 @@ Para instalar solo lo necesario para correr el sistema (sin herramientas de desa
 En otra máquina, estos son los únicos pasos: clonar, crear el entorno virtual, instalar. No hay
 configuración adicional, variables de entorno, ni archivos de secretos.
 
-Para el modo opcional `--agents` (ver más abajo) hace falta el extra `agents`:
-
-```bash
-.venv/bin/pip install -e ".[agents]"
-export ANTHROPIC_API_KEY=...
-```
-
-Sin este extra instalado, `matricula run` (sin `--agents`) sigue funcionando exactamente igual —
-`--agents` es la única puerta de entrada a esta dependencia opcional.
+El modo skills (ver más abajo) no necesita ninguna instalación adicional: no usa el paquete
+Python, sino un agente de Claude Code/Codex leyendo los skills de `.claude/skills/`.
 
 ## Uso
 
@@ -104,7 +97,7 @@ repetición automática de materias reprobadas), y repite todo el pipeline.
 ```
 usage: matricula run [-h] [--seed SEED] [--base-dir BASE_DIR]
                       [--workers WORKERS] [--visualize] [--viz-port VIZ_PORT]
-                      [--demo-delay DEMO_DELAY] [--agents] [--model MODEL]
+                      [--demo-delay DEMO_DELAY]
                       period
 
   period                 Periodo lectivo en formato YYYY-PP (PP: 01-03)
@@ -118,10 +111,6 @@ usage: matricula run [-h] [--seed SEED] [--base-dir BASE_DIR]
   --viz-port VIZ_PORT    Puerto del servidor de visualizacion (default: 8765)
   --demo-delay SEGUNDOS  Retraso artificial entre eventos del visualizador, para demos
                           (default: 0, sin retraso). Solo tiene efecto junto a --visualize.
-  --agents               Corre el pipeline con un agente orquestador real del Claude
-                          Agent SDK en vez del orquestador Python secuencial (ver abajo).
-  --model MODEL          Modelo Claude a usar con --agents (default: env var
-                          MATRICULA_AGENT_MODEL o claude-sonnet-5). Sin efecto sin --agents.
 ```
 
 Ejemplo con un directorio de trabajo explícito (útil para no mezclar corridas con el repo):
@@ -194,34 +183,50 @@ archivos se calculan y escriben exactamente igual; solo cambia cuándo se notifi
 .venv/bin/python -m matricula run 2026-01 --visualize --demo-delay 1
 ```
 
-### Modo agente (`--agents`, opcional)
+### Modo skills (orquestación por agente, opcional)
 
 Por defecto, `matricula run` corre el pipeline de 11 pasos del PRD con un orquestador Python
 secuencial 100% determinista (mismo `--seed` ⇒ mismo resultado, byte a byte, sin importar
-`--workers`). Con `--agents`, en cambio, quien decide *cuándo* invocar cada fase es un agente
-real del [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/python): cada fase del PRD
-(simular notas, validar solicitudes, calcular demanda, formar grupos, generar horario, asignar
-estudiantes, persistir resultados) se expone como una *tool* que el agente invoca.
+`--workers`). Existe además un segundo camino, **independiente de la CLI y sin nada de Python de
+negocio**: los skills de `.claude/skills/`, donde un agente de Claude Code (o Codex) corre el
+pipeline completo con su propio razonamiento, leyendo y escribiendo directamente
+`students/*.md`, `periodos_lectivos/*.md` y `profesores.md`.
 
-La lógica de negocio de cada fase **no cambia** — son las mismas funciones puras de
-`orchestration/*` que usa el modo default — y el orden de las fases sigue forzado en Python (un
-`PhaseGate` rechaza cualquier intento del agente de saltarse o repetir un paso fuera de
-secuencia). Lo que gana este modo es un agente que narra en lenguaje natural lo que va
-decidiendo y puede inspeccionar alertas sobre la marcha; lo que se pierde, respecto al modo
-default, es el determinismo estricto y la ausencia de dependencias de red — por eso es opcional
-y no reemplaza al modo default en ningún flujo.
+Son tres skills, de los cuales solo el primero se invoca a mano:
 
-```bash
-.venv/bin/pip install -e ".[agents]"
-export ANTHROPIC_API_KEY=...
-.venv/bin/python -m matricula run 2026-02 --agents
+- **`matricula`** — el orquestador y único punto de entrada. Corre inline los pasos globales y
+  baratos del PRD (0, 2, 3, 10, 11: migrar graduados, verificar consecutividad, generar
+  carnets/nombres, consolidar alertas, persistir archivos) y delega el resto vía la herramienta
+  `Task`.
+- **`matricula-estudiante`** — un `Task` por estudiante, en lotes de hasta 5 en paralelo. Cubre
+  los pasos 1 y 4 (simular notas del período anterior, construir la lista de solicitudes) para un
+  solo estudiante. Es el análogo, en este modo, del worker que el modo default corre en el
+  `ProcessPoolExecutor`.
+- **`matricula-horario`** — un único `Task` por corrida, sin paralelismo. Cubre los pasos 5 a 9
+  (validación, demanda, grupos, horario, asignación individual) en una sola pasada secuencial,
+  por la misma razón por la que `orchestration/*` es single-process en el modo default: cada fase
+  necesita la salida completa de la anterior y todas mutan estado global compartido.
+
+Invocación (dentro de una sesión de Claude Code):
+
+```
+/matricula 2026-02
+/matricula 2026-02 n_estudiantes=20 base_dir=data/escenario-a
 ```
 
-Combina con `--visualize` igual que el modo default; el visualizador recibe además eventos
-`agent_message` con lo que el agente va narrando. Si el agente no llega a invocar la última fase
-(se cuelga, falla, agota su presupuesto de turnos), el harness persiste igual lo que se alcanzó a
-calcular y agrega una alerta documentando la corrida incompleta — nunca se cuelga la corrida ni
-queda `students/`/`periodos_lectivos/` a medio escribir sin explicación.
+`base_dir` es `data/` por defecto (directorio generado y gitignoreado). Un `escenario.md`
+opcional en la raíz de `base_dir` permite variar constantes del PRD (`max_aulas`,
+`capacidad_aula`, `cupo_grupo`, `minimo_apertura`, `probabilidad_aprobacion`, `nota_minima`,
+`estudiantes_nuevos_por_periodo`) para forzar escenarios de estrés.
+
+Combina con el visualizador igual que el modo default, con una diferencia: el skill nunca levanta
+el servidor, así que hay que tener `matricula viz` ya corriendo. Publica el mismo vocabulario de
+eventos que `runner.py` más cuatro propios (`subagent_started`/`subagent_completed`,
+`phase_started`/`phase_completed`) para mostrar los subagentes en progreso.
+
+Este modo **no es determinista** (un LLM decide el cálculo y el ritmo de la narración) — el
+mismo trade-off que tenía el antiguo modo `--agents` basado en el Claude Agent SDK, que fue
+eliminado por completo y reemplazado por estos skills.
 
 ## Desarrollo
 
@@ -246,7 +251,7 @@ src/matricula/          # codigo fuente del paquete
   orchestration/            # fases secuenciales del pipeline + el runner central
   reporting/                 # resumen de la corrida y decision de exit code
   viz/                        # visualizador opcional en tiempo real (--visualize / matricula viz)
-  agent_harness/               # modo opcional --agents: orquestador via Claude Agent SDK
+.claude/skills/          # modo skills: orquestador matricula + subagentes estudiante/horario
 tests/                   # suite de pytest
 PRD.md                   # especificacion del dominio (incluye seccion de aclaraciones)
 AGENTS.md                # convenciones de estructura y estilo
