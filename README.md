@@ -29,6 +29,7 @@ completo de módulos y las decisiones de diseño.
 git clone <este-repo>
 cd simulacion_matricula
 python3 -m venv .venv
+source .venv/bin/activate
 .venv/bin/pip install -e ".[dev]"   # instala el paquete + pytest/ruff para desarrollo
 ```
 
